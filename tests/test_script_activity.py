@@ -43,7 +43,7 @@ class ScriptActivityTest(unittest.TestCase):
                     "db_path": str(tmp_path / "test.db"),
                     "artifacts_path": str(tmp_path / "artifacts"),
                     "step": step,
-                    "retry_count": 0,
+                    "feedback_retry_count": 0,
                 }
             )
 
@@ -99,7 +99,7 @@ class ScriptActivityTest(unittest.TestCase):
                     "db_path": str(tmp_path / "test.db"),
                     "artifacts_path": str(tmp_path / "artifacts"),
                     "step": step,
-                    "retry_count": 0,
+                    "feedback_retry_count": 0,
                 }
             )
 
@@ -142,7 +142,7 @@ class ScriptActivityTest(unittest.TestCase):
                         "db_path": str(tmp_path / "test.db"),
                         "artifacts_path": str(tmp_path / "artifacts"),
                         "step": step,
-                        "retry_count": 0,
+                        "feedback_retry_count": 0,
                     }
                 )
 

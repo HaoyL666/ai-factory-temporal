@@ -6,7 +6,7 @@ Task type: `{{task_type}}`
 Step: `{{step_id}}`
 Step name: `{{step_name}}`
 Workspace: `{{workspace_path}}`
-Attempt: `{{attempt}}`
+Step run: `{{step_run_number}}`
 
 ## Inputs
 

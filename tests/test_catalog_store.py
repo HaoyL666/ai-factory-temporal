@@ -65,7 +65,7 @@ class CatalogStoreTest(unittest.TestCase):
             self.assertEqual(response["workflow"]["status"], WorkflowStatus.PENDING.value)
             self.assertEqual(len(response["steps"]), 4)
 
-            store.mark_step_running(workflow_id, "plan_upgrade", retry_count=0)
+            store.mark_step_running(workflow_id, "plan_upgrade", feedback_retry_count=0)
             store.finish_step(
                 workflow_id=workflow_id,
                 step_id="plan_upgrade",
@@ -77,6 +77,7 @@ class CatalogStoreTest(unittest.TestCase):
             steps = store.list_steps(workflow_id)
             self.assertEqual(steps[0]["status"], StepStatus.SUCCEEDED.value)
             self.assertEqual(steps[0]["output"]["summary"], "ok")
+            self.assertEqual(steps[0]["feedback_retry_count"], 0)
 
     def test_rejects_script_step_without_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

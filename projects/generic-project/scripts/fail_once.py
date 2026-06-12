@@ -7,12 +7,12 @@ from pathlib import Path
 
 
 artifact_dir = Path(os.environ["AI_FACTORY_ARTIFACT_DIR"])
-retry_count = int(os.environ.get("AI_FACTORY_RETRY_COUNT", "0"))
+feedback_retry_count = int(os.environ.get("AI_FACTORY_FEEDBACK_RETRY_COUNT", "0"))
 retry_feedback = json.loads(os.environ.get("AI_FACTORY_RETRY_FEEDBACK_JSON", "{}"))
 
 payload = {
-    "passed": retry_count > 0,
-    "retry_count": retry_count,
+    "passed": feedback_retry_count > 0,
+    "feedback_retry_count": feedback_retry_count,
     "retry_feedback": retry_feedback,
 }
 artifact_dir.mkdir(parents=True, exist_ok=True)

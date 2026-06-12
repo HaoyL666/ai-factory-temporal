@@ -18,7 +18,7 @@ def render_prompt(
     project_pack: dict[str, Any],
     previous_outputs: list[dict[str, Any]],
     retry_feedback: dict[str, Any] | None = None,
-    attempt: int = 1,
+    step_run_number: int = 1,
 ) -> str:
     prompt_path = step.get("prompt")
     if prompt_path:
@@ -38,7 +38,8 @@ def render_prompt(
         "step_id": step["id"],
         "step_name": step.get("name", step["id"]),
         "workspace_path": workspace_path,
-        "attempt": str(attempt),
+        "step_run": str(step_run_number),
+        "step_run_number": str(step_run_number),
         "inputs_json": json.dumps(inputs, indent=2, sort_keys=True),
         "project_pack_json": json.dumps(project_pack, indent=2, sort_keys=True),
         "previous_outputs_json": json.dumps(previous_outputs, indent=2, sort_keys=True),

@@ -235,7 +235,7 @@ unsupported task for the selected project
 missing script command in workflow YAML
 missing prompt template or prompt include
 invalid Codex output_contract config
-invalid step kind, timeout, retry, or skip configuration
+invalid step kind, timeout, feedback retry, or skip configuration
 ```
 
 Admission errors return HTTP 400. Fix the project pack, workflow YAML, or prompt
@@ -265,9 +265,10 @@ Codex SDK/runtime exception
 ```
 
 System failures are allowed to throw into Temporal. Temporal keeps the execution
-running while task/activity failures are retried and visible in Temporal UI.
-This mirrors normal Temporal behavior: deploy a code/config/dependency fix, then
-the workflow can continue without asking the user for business feedback.
+running while workflow-task and activity failures are retried and visible in
+Temporal UI as Temporal attempts. This mirrors normal Temporal behavior: deploy
+a code/config/dependency fix, then the workflow can continue without asking the
+user for business feedback.
 
 ## Codex Output Contract
 
@@ -331,20 +332,20 @@ Codex steps can opt into an internal coder/reviewer loop:
   review: true
 ```
 
-Use `review: { enabled: true, max_review_iterations: 3 }` when a step needs a
+Use `review: { enabled: true, max_review_rounds: 3 }` when a step needs a
 custom repair cap. When review is enabled, one outer Temporal step can run
-multiple internal review iterations:
+multiple internal review rounds:
 
 ```text
-attempt-1/
-  review-1/
+step-run-1/
+  review-round-1/
     coder-prompt.md
     coder-final-response.md
     coder-contract.json
     reviewer-prompt.md
     reviewer-final-response.md
     reviewer-contract.json
-  review-2/
+  review-round-2/
     ...
   step-result.json
 ```
@@ -364,10 +365,16 @@ read-only mode by default and returns:
 ```
 
 `APPROVED` finishes the Codex step. `CHANGES_REQUESTED` starts another coder
-repair iteration until `max_review_iterations` is reached. A final rejection or
+repair round until `max_review_rounds` is reached. A final rejection or
 blocked review makes the step fail and moves the workflow to the normal feedback
 path. The DB stores one synthesized final step contract; the artifacts preserve
 every coder and reviewer contract.
+
+Reviewer prompts use one generic structure for every project and task: original
+task prompt, current coder round metadata, optional repair context, coder final
+response, parsed coder contract, current workspace diff, compact prior review
+history, and the fixed review output contract. Full coder prompts are kept as
+artifacts but are not embedded into reviewer prompts.
 
 ## E2E Smoke Workflows
 
@@ -385,6 +392,9 @@ fail_once_skip_e2e
 
 codex_timeout_e2e
   Forces a Codex timeout and waits for feedback.
+
+review_retry_chain_e2e
+  Runs a reviewed Codex repair loop, then a failed Codex step with feedback retry.
 
 approval_first
   Pauses immediately at an approval gate.

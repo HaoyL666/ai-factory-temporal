@@ -98,7 +98,7 @@ class StateActivitiesTest(unittest.TestCase):
                     "output": {"returncode": 40},
                     "artifact_uri": "/tmp/artifact",
                     "error": "script failed with exit code 40",
-                    "retry_count": 0,
+                    "feedback_retry_count": 0,
                 }
             )
 

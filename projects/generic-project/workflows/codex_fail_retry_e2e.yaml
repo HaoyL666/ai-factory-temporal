@@ -1,7 +1,7 @@
 id: codex_fail_retry_e2e
 name: Codex Fail Then Retry E2E
 description: >
-  E2E workflow that forces the first real Codex SDK attempt to return a FAILED
+  E2E workflow that forces the first Codex step-run to return a FAILED
   contract, waits for feedback, then retries and succeeds with a workspace edit.
 steps:
   - id: codex_fail_then_edit

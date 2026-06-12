@@ -6,8 +6,11 @@ from pathlib import Path
 
 from ai_factory_temporal import activities, config
 from ai_factory_temporal.activities import (
+    _build_repair_prompt,
+    _build_reviewer_prompt,
     _evaluate_codex_output_contract,
     _evaluate_codex_review_contract,
+    _repair_context,
     run_codex_step,
 )
 from ai_factory_temporal.catalog import ProjectCatalog
@@ -153,7 +156,7 @@ class CodexContractTest(unittest.TestCase):
                         "artifacts_path": str(tmp_path / "artifacts"),
                         "step": step,
                         "previous_outputs": [],
-                        "retry_count": 0,
+                        "feedback_retry_count": 0,
                     }
                 )
 
@@ -163,11 +166,11 @@ class CodexContractTest(unittest.TestCase):
         finally:
             activities.config.CODEX_MODE = old_mode
 
-    def test_stub_codex_step_review_approves_first_iteration(self) -> None:
+    def test_stub_codex_step_review_approves_first_round(self) -> None:
         result, store, workflow_id, artifact_uri = self._run_stub_reviewed_codex_step(
             {
                 "enabled": True,
-                "max_review_iterations": 2,
+                "max_review_rounds": 2,
                 "stub_verdicts": ["APPROVED"],
             }
         )
@@ -175,9 +178,9 @@ class CodexContractTest(unittest.TestCase):
         self.assertEqual(result["status"], StepStatus.SUCCEEDED.value)
         self.assertEqual(result["output"]["contract_status"], "SUCCEEDED")
         self.assertEqual(result["output"]["review"]["final_verdict"], "APPROVED")
-        self.assertEqual(result["output"]["review"]["review_iterations"], 1)
-        self.assertTrue((artifact_uri / "review-1" / "coder-contract.json").exists())
-        self.assertTrue((artifact_uri / "review-1" / "reviewer-contract.json").exists())
+        self.assertEqual(result["output"]["review"]["review_rounds"], 1)
+        self.assertTrue((artifact_uri / "review-round-1" / "coder-contract.json").exists())
+        self.assertTrue((artifact_uri / "review-round-1" / "reviewer-contract.json").exists())
         self.assertTrue((artifact_uri / "step-result.json").exists())
         self.assertEqual(store.list_steps(workflow_id)[0]["status"], StepStatus.SUCCEEDED.value)
 
@@ -185,34 +188,159 @@ class CodexContractTest(unittest.TestCase):
         result, _store, _workflow_id, artifact_uri = self._run_stub_reviewed_codex_step(
             {
                 "enabled": True,
-                "max_review_iterations": 2,
+                "max_review_rounds": 2,
                 "stub_verdicts": ["CHANGES_REQUESTED", "APPROVED"],
             }
         )
 
         self.assertEqual(result["status"], StepStatus.SUCCEEDED.value)
         self.assertEqual(result["output"]["review"]["final_verdict"], "APPROVED")
-        self.assertEqual(result["output"]["review"]["review_iterations"], 2)
-        self.assertEqual(result["output"]["review"]["repair_attempts"], 1)
-        self.assertTrue((artifact_uri / "review-2" / "coder-prompt.md").exists())
+        self.assertEqual(result["output"]["review"]["review_rounds"], 2)
+        self.assertEqual(result["output"]["review"]["repair_rounds"], 1)
+        self.assertTrue((artifact_uri / "review-round-2" / "coder-prompt.md").exists())
+        reviewer_prompt = (
+            artifact_uri / "review-round-2" / "reviewer-prompt.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("## Current Coder Round", reviewer_prompt)
+        self.assertIn('"round_type": "repair"', reviewer_prompt)
+        self.assertIn("## Reviewer Feedback Being Addressed", reviewer_prompt)
+        self.assertNotIn("## Coder Prompt For This Review Round", reviewer_prompt)
 
-    def test_stub_codex_step_review_rejection_fails_after_max_iterations(self) -> None:
+    def test_stub_codex_step_review_rejection_fails_after_max_rounds(self) -> None:
         result, store, workflow_id, artifact_uri = self._run_stub_reviewed_codex_step(
             {
                 "enabled": True,
-                "max_review_iterations": 1,
+                "max_review_rounds": 1,
                 "stub_verdicts": ["CHANGES_REQUESTED"],
             }
         )
 
         self.assertEqual(result["status"], StepStatus.FAILED.value)
-        self.assertIn("Codex review rejected final attempt", result["error"])
+        self.assertIn("Codex review rejected final round", result["error"])
         self.assertEqual(result["output"]["contract_status"], "FAILED")
         self.assertEqual(result["output"]["review"]["final_verdict"], "CHANGES_REQUESTED")
         self.assertTrue((artifact_uri / "step-result.json").exists())
         stored = store.list_steps(workflow_id)[0]
         self.assertEqual(stored["status"], StepStatus.FAILED.value)
-        self.assertIn("Codex review rejected final attempt", stored["error"])
+        self.assertIn("Codex review rejected final round", stored["error"])
+
+    def test_reviewer_prompt_uses_compact_current_round_context(self) -> None:
+        repair_context = _repair_context(
+            review_round=2,
+            previous_review_round=1,
+            previous_coder_contract={
+                "status": "SUCCEEDED",
+                "summary": "initial edit done",
+                "changed_files": ["target.txt"],
+            },
+            reviewer_feedback={
+                "status": "SUCCEEDED",
+                "verdict": "CHANGES_REQUESTED",
+                "summary": "missing required validation",
+                "required_fixes": ["add validation output"],
+            },
+        )
+        review_history = [
+            {
+                "review_round": 1,
+                "verdict": "CHANGES_REQUESTED",
+                "coder_summary": "initial edit done",
+                "reviewer_summary": "missing required validation",
+                "findings": ["validation missing"],
+                "required_fixes": ["add validation output"],
+                "coder_contract": "/artifacts/review-round-1/coder-contract.json",
+                "reviewer_contract": "/artifacts/review-round-1/reviewer-contract.json",
+                "coder_prompt": "/artifacts/review-round-1/coder-prompt.md",
+                "coder_response": "/artifacts/review-round-1/coder-final-response.md",
+                "reviewer_prompt": "/artifacts/review-round-1/reviewer-prompt.md",
+                "reviewer_response": "/artifacts/review-round-1/reviewer-final-response.md",
+            }
+        ]
+
+        prompt = _build_reviewer_prompt(
+            original_prompt="# Original Task\n\nDo the task.",
+            review_round=2,
+            coder_prompt_path=Path("/artifacts/review-round-2/coder-prompt.md"),
+            repair_context=repair_context,
+            coder_response='{"status":"SUCCEEDED"}',
+            coder_contract={"status": "SUCCEEDED", "summary": "repair done"},
+            workspace_path="/tmp/not-a-git-workspace",
+            review_history=review_history,
+        )
+
+        self.assertIn("## Original Task Prompt", prompt)
+        self.assertIn("## Current Coder Round", prompt)
+        self.assertIn('"round_type": "repair"', prompt)
+        self.assertIn('"coder_prompt_artifact": "/artifacts/review-round-2/coder-prompt.md"', prompt)
+        self.assertIn("## Repair Context", prompt)
+        self.assertIn("## Reviewer Feedback Being Addressed", prompt)
+        self.assertIn("## Current Workspace Diff", prompt)
+        self.assertIn("git diff --no-ext-diff --no-color -- .", prompt)
+        self.assertIn("## Prior Review History", prompt)
+        self.assertIn('"reviewer_summary": "missing required validation"', prompt)
+        self.assertNotIn("## Coder Prompt For This Review Round", prompt)
+
+        self.assertEqual(
+            prompt,
+            _build_reviewer_prompt(
+                original_prompt="# Original Task\n\nDo the task.",
+                review_round=2,
+                coder_prompt_path=Path("/artifacts/review-round-2/coder-prompt.md"),
+                repair_context=repair_context,
+                coder_response='{"status":"SUCCEEDED"}',
+                coder_contract={"status": "SUCCEEDED", "summary": "repair done"},
+                workspace_path="/tmp/not-a-git-workspace",
+                review_history=review_history,
+            ),
+        )
+
+    def test_repair_prompt_uses_stable_repair_context(self) -> None:
+        repair_context = _repair_context(
+            review_round=2,
+            previous_review_round=1,
+            previous_coder_contract={"summary": "initial edit done", "status": "SUCCEEDED"},
+            reviewer_feedback={
+                "verdict": "CHANGES_REQUESTED",
+                "required_fixes": ["add validation output"],
+            },
+        )
+        review_history = [
+            {
+                "review_round": 1,
+                "verdict": "CHANGES_REQUESTED",
+                "coder_summary": "initial edit done",
+                "reviewer_summary": "missing required validation",
+                "findings": [],
+                "required_fixes": ["add validation output"],
+                "coder_contract": "/artifacts/review-round-1/coder-contract.json",
+                "reviewer_contract": "/artifacts/review-round-1/reviewer-contract.json",
+            }
+        ]
+
+        prompt = _build_repair_prompt(
+            original_prompt="# Original Task\n\nDo the task.",
+            review_history=review_history,
+            repair_context=repair_context,
+        )
+
+        self.assertIn("# Codex Repair Round", prompt)
+        self.assertIn("## Original Task Prompt", prompt)
+        self.assertIn("## Current Coder Round", prompt)
+        self.assertIn('"review_round": 2', prompt)
+        self.assertIn("## Repair Context", prompt)
+        self.assertIn("## Reviewer Feedback Being Addressed", prompt)
+        self.assertIn("## Prior Review History", prompt)
+        self.assertIn("## Output Instruction", prompt)
+        self.assertNotIn("## Coder Prompt For This Review Round", prompt)
+
+        self.assertEqual(
+            prompt,
+            _build_repair_prompt(
+                original_prompt="# Original Task\n\nDo the task.",
+                review_history=review_history,
+                repair_context=repair_context,
+            ),
+        )
 
     def _run_stub_reviewed_codex_step(
         self,
@@ -263,7 +391,7 @@ class CodexContractTest(unittest.TestCase):
                     "artifacts_path": str(tmp_path / "artifacts"),
                     "step": step,
                     "previous_outputs": [],
-                    "retry_count": 0,
+                    "feedback_retry_count": 0,
                 }
             )
             return result, store, workflow_id, Path(result["artifact_uri"])

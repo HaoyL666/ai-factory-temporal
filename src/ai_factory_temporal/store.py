@@ -58,7 +58,7 @@ class SQLiteStore:
                   output_json TEXT,
                   artifact_uri TEXT,
                   error TEXT,
-                  retry_count INTEGER NOT NULL DEFAULT 0,
+                  feedback_retry_count INTEGER NOT NULL DEFAULT 0,
                   started_at TEXT,
                   finished_at TEXT,
                   FOREIGN KEY(workflow_id) REFERENCES workflows(id)
@@ -86,6 +86,20 @@ class SQLiteStore:
                   ON workflow_steps(workflow_id, step_order);
                 """
             )
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(workflow_steps)").fetchall()
+            }
+            if "feedback_retry_count" not in columns:
+                conn.execute(
+                    "ALTER TABLE workflow_steps "
+                    "ADD COLUMN feedback_retry_count INTEGER NOT NULL DEFAULT 0"
+                )
+                if "retry_count" in columns:
+                    conn.execute(
+                        "UPDATE workflow_steps "
+                        "SET feedback_retry_count = retry_count"
+                    )
 
     def create_workflow(
         self,
@@ -148,16 +162,27 @@ class SQLiteStore:
                 (status, utc_now(), workflow_id),
             )
 
-    def mark_step_running(self, workflow_id: str, step_id: str, retry_count: int) -> None:
+    def mark_step_running(
+        self,
+        workflow_id: str,
+        step_id: str,
+        feedback_retry_count: int,
+    ) -> None:
         with self.connect() as conn:
             conn.execute(
                 """
                 UPDATE workflow_steps
                 SET status = ?, started_at = ?, finished_at = NULL, error = NULL,
-                    retry_count = ?
+                    feedback_retry_count = ?
                 WHERE workflow_id = ? AND step_id = ?
                 """,
-                (StepStatus.RUNNING.value, utc_now(), retry_count, workflow_id, step_id),
+                (
+                    StepStatus.RUNNING.value,
+                    utc_now(),
+                    feedback_retry_count,
+                    workflow_id,
+                    step_id,
+                ),
             )
 
     def finish_step(
@@ -169,7 +194,7 @@ class SQLiteStore:
         output: dict[str, Any],
         artifact_uri: str | None = None,
         error: str | None = None,
-        retry_count: int | None = None,
+        feedback_retry_count: int | None = None,
     ) -> None:
         finished_at = utc_now() if status not in {
             StepStatus.RUNNING.value,
@@ -190,9 +215,9 @@ class SQLiteStore:
             error,
             finished_at,
         ]
-        if retry_count is not None:
-            assignments.append("retry_count = ?")
-            params.append(retry_count)
+        if feedback_retry_count is not None:
+            assignments.append("feedback_retry_count = ?")
+            params.append(feedback_retry_count)
         params.extend([workflow_id, step_id])
 
         with self.connect() as conn:
@@ -281,7 +306,7 @@ class SQLiteStore:
             "output": json.loads(row["output_json"]) if row["output_json"] else None,
             "artifact_uri": row["artifact_uri"],
             "error": row["error"],
-            "retry_count": row["retry_count"],
+            "feedback_retry_count": row["feedback_retry_count"],
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
         }

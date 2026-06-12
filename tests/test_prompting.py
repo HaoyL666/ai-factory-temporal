@@ -25,12 +25,13 @@ class PromptingTest(unittest.TestCase):
             project_pack=pack,
             previous_outputs=[],
             retry_feedback=None,
-            attempt=1,
+            step_run_number=1,
         )
 
         self.assertIn("## Runtime Context", rendered)
         self.assertIn("Workflow: `wf-test`", rendered)
         self.assertIn("Project: `generic-project`", rendered)
+        self.assertIn("Step run: `1`", rendered)
         self.assertIn("`1.2.3`", rendered)
         self.assertIn("## Output Contract", rendered)
         self.assertNotIn("{{include:", rendered)

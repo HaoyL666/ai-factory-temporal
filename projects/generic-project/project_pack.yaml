@@ -22,3 +22,5 @@ supported_tasks:
   - default_contract_e2e
   - codex_chain_approval_e2e
   - codex_fail_retry_e2e
+  - review_retry_chain_e2e
+  - review_exhaust_abort_e2e

@@ -30,7 +30,7 @@ policies:
     live_oci_validation_requires_approval: true
     publish_requires_approval: true
   retries:
-    frontier_review_attempts: 3
+    frontier_review_rounds: 3
     codex_feedback_retries: 2
   artifacts:
     store_prompts: true

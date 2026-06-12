@@ -22,7 +22,7 @@ def context() -> dict[str, Any]:
         "inputs": inputs,
         "workflow_id": os.environ["AI_FACTORY_WORKFLOW_ID"],
         "step_id": os.environ["AI_FACTORY_STEP_ID"],
-        "retry_count": int(os.environ.get("AI_FACTORY_RETRY_COUNT", "0")),
+        "feedback_retry_count": int(os.environ.get("AI_FACTORY_FEEDBACK_RETRY_COUNT", "0")),
         "retry_feedback": json.loads(os.environ.get("AI_FACTORY_RETRY_FEEDBACK_JSON", "{}")),
     }
 

@@ -1,0 +1,50 @@
+id: review_exhaust_abort_e2e
+name: Review Exhaustion Then Abort E2E
+description: >
+  E2E workflow that first proves a reviewed Codex step can repair and approve
+  after two review rounds, then forces the next reviewed Codex step to exhaust
+  review rounds and wait for human feedback.
+steps:
+  - id: codex_review_repair_first
+    name: Codex Review Repair First
+    kind: codex
+    prompt: prompts/review_retry_chain/review_repair_first.md
+    review:
+      enabled: true
+      max_review_rounds: 2
+      reviewer_timeout_seconds: 900
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+        - changed_files
+    timeout_seconds: 900
+    max_feedback_retries: 0
+
+  - id: codex_review_exhaust
+    name: Codex Review Exhaust
+    kind: codex
+    prompt: prompts/review_retry_chain/exhaust_review.md
+    review:
+      enabled: true
+      max_review_rounds: 1
+      reviewer_timeout_seconds: 900
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+        - changed_files
+    timeout_seconds: 900
+    max_feedback_retries: 1
+
+  - id: should_not_run_after_abort
+    name: Should Not Run After Abort
+    kind: deterministic
+    runner: script
+    command:
+      - python3.12
+      - "{{project_dir}}/scripts/validate_workspace.py"
+    cwd: "{{workspace_path}}"
+    timeout_seconds: 120
+    allow_skip: false
+    max_feedback_retries: 0

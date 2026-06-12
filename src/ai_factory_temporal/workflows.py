@@ -243,7 +243,7 @@ class AIFactoryWorkflow:
         previous_outputs: list[dict[str, Any]],
         step_order: int,
     ) -> dict[str, Any]:
-        retry_count = 0
+        feedback_retry_count = 0
         retry_feedback: dict[str, Any] | None = None
         max_feedback_retries = int(step.get("max_feedback_retries", 3))
 
@@ -258,16 +258,16 @@ class AIFactoryWorkflow:
                     **spec,
                     "step": step,
                     "previous_outputs": previous_outputs,
-                    "retry_count": retry_count,
+                    "feedback_retry_count": feedback_retry_count,
                     "retry_feedback": retry_feedback,
                 },
                 timeout_seconds=int(step.get("timeout_seconds", 1800)) + 60,
                 activity_id=(
                     f"run-{self._timeline_step_ref(step_order, step['id'])}"
-                    f"-attempt-{retry_count + 1}"
+                    f"-step-run-{feedback_retry_count + 1}"
                 ),
                 summary=self._timeline_summary(
-                    f"Run {step['kind']} attempt {retry_count + 1}",
+                    f"Run {step['kind']} step run {feedback_retry_count + 1}",
                     step_order,
                     step["id"],
                 ),
@@ -281,7 +281,7 @@ class AIFactoryWorkflow:
                 "step_id": step["id"],
                 "error": result.get("error"),
                 "artifact_uri": result.get("artifact_uri"),
-                "retry_count": retry_count,
+                "feedback_retry_count": feedback_retry_count,
             }
             await self._activity(
                 "record_step_waiting_for_feedback",
@@ -292,14 +292,14 @@ class AIFactoryWorkflow:
                     "output": result.get("output", {}),
                     "artifact_uri": result.get("artifact_uri"),
                     "error": result.get("error"),
-                    "retry_count": retry_count,
+                    "feedback_retry_count": feedback_retry_count,
                 },
                 activity_id=(
                     f"waiting-feedback-{self._timeline_step_ref(step_order, step['id'])}"
-                    f"-attempt-{retry_count + 1}"
+                    f"-step-run-{feedback_retry_count + 1}"
                 ),
                 summary=self._timeline_summary(
-                    f"Step waiting for feedback after attempt {retry_count + 1}",
+                    f"Step waiting for feedback after step run {feedback_retry_count + 1}",
                     step_order,
                     step["id"],
                 ),
@@ -309,7 +309,7 @@ class AIFactoryWorkflow:
                 WorkflowStatus.WAITING_FOR_FEEDBACK.value,
                 activity_id=(
                     f"workflow-status-waiting-feedback-{self._timeline_step_ref(step_order, step['id'])}"
-                    f"-attempt-{retry_count + 1}"
+                    f"-step-run-{feedback_retry_count + 1}"
                 ),
                 summary=self._workflow_status_summary(
                     WorkflowStatus.WAITING_FOR_FEEDBACK.value,
@@ -336,7 +336,7 @@ class AIFactoryWorkflow:
                 activity_id=(
                     f"feedback-{feedback.get('action', 'retry')}-"
                     f"{self._timeline_step_ref(step_order, step['id'])}"
-                    f"-attempt-{retry_count + 1}"
+                    f"-step-run-{feedback_retry_count + 1}"
                 ),
                 summary=self._timeline_summary(
                     f"Feedback {feedback.get('action', 'retry')}",
@@ -345,8 +345,8 @@ class AIFactoryWorkflow:
                 ),
             )
             action = feedback.get("action", "retry")
-            if action == "retry" and retry_count < max_feedback_retries:
-                retry_count += 1
+            if action == "retry" and feedback_retry_count < max_feedback_retries:
+                feedback_retry_count += 1
                 retry_feedback = feedback
                 self.pending_failure = None
                 await self._set_workflow_status(
@@ -354,10 +354,10 @@ class AIFactoryWorkflow:
                     WorkflowStatus.RUNNING.value,
                     activity_id=(
                         f"workflow-status-running-retry-{self._timeline_step_ref(step_order, step['id'])}"
-                        f"-attempt-{retry_count + 1}"
+                        f"-step-run-{feedback_retry_count + 1}"
                     ),
                     summary=self._timeline_summary(
-                        f"Workflow running for retry attempt {retry_count + 1}",
+                        f"Workflow running for feedback retry, step run {feedback_retry_count + 1}",
                         step_order,
                         step["id"],
                     ),
@@ -395,7 +395,7 @@ class AIFactoryWorkflow:
                     "output": result.get("output", {}),
                     "artifact_uri": result.get("artifact_uri"),
                     "error": result.get("error"),
-                    "retry_count": retry_count,
+                    "feedback_retry_count": feedback_retry_count,
                 },
                 activity_id=f"fail-{self._timeline_step_ref(step_order, step['id'])}",
                 summary=self._timeline_summary("Step failed", step_order, step["id"]),

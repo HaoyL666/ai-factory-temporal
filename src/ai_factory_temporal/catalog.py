@@ -178,7 +178,7 @@ class ProjectCatalog:
         if enabled is not None and not isinstance(enabled, bool):
             raise CatalogError(f"{label} review.enabled must be a boolean")
 
-        for field_name in ("max_review_iterations", "reviewer_timeout_seconds"):
+        for field_name in ("max_review_rounds", "reviewer_timeout_seconds"):
             value = review.get(field_name)
             if value is None:
                 continue
