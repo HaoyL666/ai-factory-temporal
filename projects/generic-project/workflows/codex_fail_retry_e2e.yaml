@@ -1,0 +1,29 @@
+id: codex_fail_retry_e2e
+name: Codex Fail Then Retry E2E
+description: >
+  E2E workflow that forces the first real Codex SDK attempt to return a FAILED
+  contract, waits for feedback, then retries and succeeds with a workspace edit.
+steps:
+  - id: codex_fail_then_edit
+    name: Codex Fail Then Edit
+    kind: codex
+    prompt: prompts/smoke_codex_retry/fail_then_edit.md
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+        - changed_files
+    timeout_seconds: 900
+    max_feedback_retries: 1
+
+  - id: verify_codex_retry
+    name: Verify Codex Retry
+    kind: deterministic
+    runner: script
+    command:
+      - python3.12
+      - "{{project_dir}}/scripts/verify_codex_retry.py"
+    cwd: "{{workspace_path}}"
+    timeout_seconds: 120
+    allow_skip: false
+    max_feedback_retries: 0

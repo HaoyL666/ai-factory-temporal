@@ -1,0 +1,50 @@
+id: upgrade
+name: Generic Upgrade Workflow
+description: >
+  Example predefined workflow with Codex, deterministic validation, approval,
+  and publish steps.
+steps:
+  - id: plan_upgrade
+    name: Plan Upgrade
+    kind: codex
+    prompt: prompts/terraform_upgrade/plan_upgrade.md
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+    timeout_seconds: 900
+    max_feedback_retries: 3
+
+  - id: validate_workspace
+    name: Validate Workspace
+    kind: deterministic
+    runner: script
+    command:
+      - python3.12
+      - "{{project_dir}}/scripts/validate_workspace.py"
+    cwd: "{{workspace_path}}"
+    timeout_seconds: 120
+    allow_skip: false
+
+  - id: publish_approval
+    name: Publish Approval
+    kind: approval
+    message: Approve publishing the generated upgrade artifacts.
+    approved_step:
+      runner: script
+      command:
+        - python3.12
+        - "{{project_dir}}/scripts/mock_publish.py"
+      cwd: "{{workspace_path}}"
+      timeout_seconds: 120
+
+  - id: final_summary
+    name: Final Summary
+    kind: codex
+    prompt: prompts/terraform_upgrade/final_summary.md
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+    timeout_seconds: 900
+    max_feedback_retries: 2

@@ -1,0 +1,32 @@
+from __future__ import annotations
+
+from enum import Enum
+
+
+class WorkflowStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
+    WAITING_FOR_FEEDBACK = "WAITING_FOR_FEEDBACK"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class StepStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
+    FAILED_WAITING_FOR_FEEDBACK = "FAILED_WAITING_FOR_FEEDBACK"
+    SUCCEEDED = "SUCCEEDED"
+    SKIPPED = "SKIPPED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+TERMINAL_STEP_STATUSES = {
+    StepStatus.SUCCEEDED.value,
+    StepStatus.SKIPPED.value,
+    StepStatus.FAILED.value,
+    StepStatus.CANCELLED.value,
+}

@@ -1,0 +1,24 @@
+project_id: generic-project
+display_name: Generic Local Project
+description: >
+  Example project pack used by the local Temporal AI Factory harness.
+source_of_truth:
+  - README.md
+  - package metadata
+policies:
+  codex:
+    default_sandbox: workspace-write
+    default_approval_mode: auto_review
+  artifacts:
+    store_prompts: true
+    store_outputs: true
+supported_tasks:
+  - upgrade
+  - approval_first
+  - codex_edit_e2e
+  - fail_once_retry_e2e
+  - fail_once_skip_e2e
+  - codex_timeout_e2e
+  - default_contract_e2e
+  - codex_chain_approval_e2e
+  - codex_fail_retry_e2e

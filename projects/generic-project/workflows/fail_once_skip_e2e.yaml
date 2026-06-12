@@ -1,0 +1,27 @@
+id: fail_once_skip_e2e
+name: Fail Once Skip E2E
+description: >
+  E2E workflow that fails once, waits for feedback, and permits the step to be skipped.
+steps:
+  - id: optional_fail_once
+    name: Optional Fail Once
+    kind: deterministic
+    runner: script
+    command:
+      - python3.12
+      - "{{project_dir}}/scripts/fail_once.py"
+    cwd: "{{workspace_path}}"
+    timeout_seconds: 120
+    allow_skip: true
+    max_feedback_retries: 2
+
+  - id: validate_after_skip
+    name: Validate After Skip
+    kind: deterministic
+    runner: script
+    command:
+      - python3.12
+      - "{{project_dir}}/scripts/validate_workspace.py"
+    cwd: "{{workspace_path}}"
+    timeout_seconds: 120
+    allow_skip: false

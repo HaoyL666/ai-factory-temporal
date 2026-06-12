@@ -1,0 +1,16 @@
+id: codex_timeout_e2e
+name: Codex Timeout E2E
+description: >
+  E2E workflow that forces a real Codex step timeout to verify Codex failure feedback.
+steps:
+  - id: codex_timeout
+    name: Codex Timeout
+    kind: codex
+    prompt: prompts/smoke_codex_edit/codex_edit_file.md
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+        - changed_files
+    timeout_seconds: 1
+    max_feedback_retries: 0

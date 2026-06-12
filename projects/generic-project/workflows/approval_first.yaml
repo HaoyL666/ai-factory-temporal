@@ -1,0 +1,27 @@
+id: approval_first
+name: Approval First Workflow
+description: >
+  Test workflow that pauses immediately at a human approval gate.
+steps:
+  - id: initial_approval
+    name: Initial Approval
+    kind: approval
+    message: Approve starting the approval-first test workflow.
+    approved_step:
+      runner: script
+      command:
+        - python3.12
+        - "{{project_dir}}/scripts/mock_publish.py"
+      cwd: "{{workspace_path}}"
+      timeout_seconds: 120
+
+  - id: validate_after_approval
+    name: Validate After Approval
+    kind: deterministic
+    runner: script
+    command:
+      - python3.12
+      - "{{project_dir}}/scripts/validate_workspace.py"
+    cwd: "{{workspace_path}}"
+    timeout_seconds: 120
+    allow_skip: false

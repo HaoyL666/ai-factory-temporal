@@ -1,0 +1,28 @@
+[project]
+name = "ai-factory-temporal"
+version = "0.1.0"
+description = "Local Temporal-backed AI Factory harness for Codex and deterministic workflow steps."
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.111",
+  "openai-codex",
+  "pydantic>=2",
+  "pyyaml>=6",
+  "temporalio>=1.7",
+  "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+
+[project.scripts]
+ai-factory-api = "ai_factory_temporal.api:main"
+ai-factory-worker = "ai_factory_temporal.worker:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100

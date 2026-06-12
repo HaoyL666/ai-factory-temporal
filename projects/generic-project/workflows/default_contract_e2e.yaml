@@ -1,0 +1,12 @@
+id: default_contract_e2e
+name: Default Codex Contract E2E
+description: >
+  E2E workflow proving Codex steps use the default output contract without
+  workflow-level contract configuration.
+steps:
+  - id: default_contract_codex
+    name: Default Contract Codex
+    kind: codex
+    prompt: prompts/smoke_default_contract/default_summary.md
+    timeout_seconds: 120
+    max_feedback_retries: 0

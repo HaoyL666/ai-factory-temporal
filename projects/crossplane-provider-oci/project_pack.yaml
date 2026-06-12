@@ -1,0 +1,52 @@
+project_id: crossplane-provider-oci
+display_name: Crossplane Provider OCI
+description: >
+  Project pack for Terraform provider version upgrades in Crossplane Provider OCI.
+  The pack models AI-owned repository analysis and deterministic generation,
+  build, package, publish, install, and live-validation gates.
+source_of_truth:
+  - Makefile
+  - config/schema.json
+  - config/
+  - apis/
+  - internal/controller/
+  - package/crds/
+  - examples-generated/
+  - docs/
+  - .github/workflows/
+repository:
+  expected_name: provider-oci
+  provider_source: oracle/oci
+  terraform_provider_version_variable: TERRAFORM_PROVIDER_VERSION
+  terraform_provider_schema: config/schema.json
+policies:
+  codex:
+    default_sandbox: workspace-write
+    default_review_sandbox: read-only
+    default_approval_mode: auto_review
+  validation:
+    default_level: L1_BUILD_GENERATE
+    install_validation_requires_approval: true
+    live_oci_validation_requires_approval: true
+    publish_requires_approval: true
+  retries:
+    frontier_review_attempts: 3
+    codex_feedback_retries: 2
+  artifacts:
+    store_prompts: true
+    store_outputs: true
+    redact_sensitive_values: true
+approval_required_actions:
+  - publish provider package or image to a registry
+  - deploy or mutate a shared Kubernetes or OKE cluster
+  - create, update, import, or delete live OCI resources
+  - read or write tenancy-sensitive secrets, kubeconfigs, tokens, or credentials
+validation_levels:
+  L1_BUILD_GENERATE:
+    description: Generate, diff, build, test, and package evidence without cluster or live OCI actions.
+  L2_INSTALL:
+    description: Includes package install validation in local Kubernetes or OKE after approval.
+  L3_LIVE_OCI:
+    description: Includes selected live OCI CRUD/import/delete validation after approval.
+supported_tasks:
+  - terraform_provider_upgrade

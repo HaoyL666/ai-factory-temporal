@@ -1,0 +1,155 @@
+id: terraform_provider_upgrade
+name: Terraform Provider Version Upgrade
+description: >
+  Upgrade the Terraform provider version for Crossplane Provider OCI with
+  AI-owned planning, scoped source-of-truth edits, deterministic evidence
+  collection, risk analysis, approval-gated publish/install/live validation,
+  and a final review packet.
+steps:
+  - id: confirm_target_and_baseline
+    name: Confirm Target and Baseline
+    kind: codex
+    prompt: prompts/terraform_provider_upgrade/confirm_target_and_baseline.md
+    sandbox: read-only
+    timeout_seconds: 900
+    max_feedback_retries: 2
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+        - changed_files
+        - checks
+        - evidence
+        - risks
+
+  - id: apply_version_bump
+    name: Apply Version Bump
+    kind: codex
+    prompt: prompts/terraform_provider_upgrade/apply_version_bump.md
+    sandbox: workspace-write
+    timeout_seconds: 900
+    max_feedback_retries: 2
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+        - changed_files
+        - checks
+        - evidence
+        - risks
+
+  - id: generate_diff_evidence
+    name: Generate, Diff, and Normalize Evidence
+    kind: deterministic
+    runner: script
+    command:
+      - python3.12
+      - "{{project_dir}}/scripts/collect_generation_evidence.py"
+    cwd: "{{workspace_path}}"
+    timeout_seconds: 180
+    allow_skip: false
+    max_feedback_retries: 2
+
+  - id: classify_breaking_changes
+    name: Classify Breaking Changes
+    kind: codex
+    prompt: prompts/terraform_provider_upgrade/classify_breaking_changes.md
+    sandbox: read-only
+    timeout_seconds: 900
+    max_feedback_retries: 2
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+        - changed_files
+        - checks
+        - evidence
+        - risks
+
+  - id: custom_config_controller_impact
+    name: Check Custom Config and Controller Impact
+    kind: codex
+    prompt: prompts/terraform_provider_upgrade/custom_config_controller_impact.md
+    sandbox: read-only
+    timeout_seconds: 900
+    max_feedback_retries: 2
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+        - changed_files
+        - checks
+        - evidence
+        - risks
+
+  - id: build_test_package
+    name: Build, Test, and Package Evidence
+    kind: deterministic
+    runner: script
+    command:
+      - python3.12
+      - "{{project_dir}}/scripts/collect_build_package_evidence.py"
+    cwd: "{{workspace_path}}"
+    timeout_seconds: 180
+    allow_skip: false
+    max_feedback_retries: 2
+
+  - id: publish_approval
+    name: Publish Artifacts Approval
+    kind: approval
+    message: >
+      Approve publishing provider artifacts only after reviewing version,
+      registry destination, provenance, checksums, and redacted logs.
+    approved_step:
+      runner: script
+      command:
+        - python3.12
+        - "{{project_dir}}/scripts/record_publish_gate.py"
+      cwd: "{{workspace_path}}"
+      timeout_seconds: 120
+
+  - id: install_validation_approval
+    name: Kubernetes or OKE Install Validation Approval
+    kind: approval
+    message: >
+      Approve install validation in local Kubernetes or OKE. Shared clusters,
+      package pulls, ProviderConfig paths, and package pull secrets must be
+      reviewed before execution.
+    approved_step:
+      runner: script
+      command:
+        - python3.12
+        - "{{project_dir}}/scripts/record_install_validation_gate.py"
+      cwd: "{{workspace_path}}"
+      timeout_seconds: 120
+
+  - id: live_oci_validation_approval
+    name: Selective Live OCI Validation Approval
+    kind: approval
+    message: >
+      Approve live OCI validation only for selected high-risk resources. This
+      gate may create, update, import, or delete OCI resources and must include
+      cleanup and redaction requirements.
+    approved_step:
+      runner: script
+      command:
+        - python3.12
+        - "{{project_dir}}/scripts/record_live_oci_validation_gate.py"
+      cwd: "{{workspace_path}}"
+      timeout_seconds: 120
+
+  - id: assemble_final_review_packet
+    name: Assemble Final Review Packet
+    kind: codex
+    prompt: prompts/terraform_provider_upgrade/assemble_final_review_packet.md
+    sandbox: read-only
+    timeout_seconds: 900
+    max_feedback_retries: 2
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+        - changed_files
+        - checks
+        - evidence
+        - risks

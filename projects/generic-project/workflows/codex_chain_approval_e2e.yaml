@@ -1,0 +1,53 @@
+id: codex_chain_approval_e2e
+name: Codex Chain With Approval E2E
+description: >
+  E2E workflow that runs two Codex SDK steps, validates their workspace edits,
+  then waits for approval before running a final deterministic publish step.
+steps:
+  - id: codex_write_first_marker
+    name: Codex Write First Marker
+    kind: codex
+    prompt: prompts/smoke_codex_chain/write_first_marker.md
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+        - changed_files
+    timeout_seconds: 900
+    max_feedback_retries: 0
+
+  - id: codex_write_second_marker
+    name: Codex Write Second Marker
+    kind: codex
+    prompt: prompts/smoke_codex_chain/write_second_marker.md
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+        - changed_files
+    timeout_seconds: 900
+    max_feedback_retries: 0
+
+  - id: verify_codex_chain
+    name: Verify Codex Chain
+    kind: deterministic
+    runner: script
+    command:
+      - python3.12
+      - "{{project_dir}}/scripts/verify_codex_chain.py"
+    cwd: "{{workspace_path}}"
+    timeout_seconds: 120
+    allow_skip: false
+    max_feedback_retries: 0
+
+  - id: approval_publish
+    name: Approval Publish
+    kind: approval
+    message: Approve the final deterministic publish step for the Codex chain smoke test.
+    approved_step:
+      runner: script
+      command:
+        - python3.12
+        - "{{project_dir}}/scripts/mock_publish.py"
+      cwd: "{{workspace_path}}"
+      timeout_seconds: 120

@@ -1,0 +1,28 @@
+id: codex_edit_e2e
+name: Codex Edit E2E
+description: >
+  E2E workflow that asks real Codex to edit a workspace file and verifies the edit.
+steps:
+  - id: codex_edit_file
+    name: Codex Edit File
+    kind: codex
+    prompt: prompts/smoke_codex_edit/codex_edit_file.md
+    output_contract:
+      type: status_json
+      required_fields:
+        - summary
+        - changed_files
+    timeout_seconds: 900
+    max_feedback_retries: 1
+
+  - id: verify_codex_edit
+    name: Verify Codex Edit
+    kind: deterministic
+    runner: script
+    command:
+      - python3.12
+      - "{{project_dir}}/scripts/verify_codex_edit.py"
+    cwd: "{{workspace_path}}"
+    timeout_seconds: 120
+    allow_skip: false
+    max_feedback_retries: 1

@@ -1,0 +1,16 @@
+id: fail_once_retry_e2e
+name: Fail Once Retry E2E
+description: >
+  E2E workflow that fails a script step once, waits for feedback, then succeeds on retry.
+steps:
+  - id: fail_once
+    name: Fail Once
+    kind: deterministic
+    runner: script
+    command:
+      - python3.12
+      - "{{project_dir}}/scripts/fail_once.py"
+    cwd: "{{workspace_path}}"
+    timeout_seconds: 120
+    allow_skip: false
+    max_feedback_retries: 2
