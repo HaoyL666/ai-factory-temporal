@@ -11,6 +11,7 @@ steps:
     kind: codex
     prompt: prompts/terraform_provider_upgrade/confirm_target_and_baseline.md
     sandbox: read-only
+    review: true
     timeout_seconds: 900
     max_feedback_retries: 2
     output_contract:
@@ -27,6 +28,7 @@ steps:
     kind: codex
     prompt: prompts/terraform_provider_upgrade/apply_version_bump.md
     sandbox: workspace-write
+    review: true
     timeout_seconds: 900
     max_feedback_retries: 2
     output_contract:
@@ -55,6 +57,7 @@ steps:
     kind: codex
     prompt: prompts/terraform_provider_upgrade/classify_breaking_changes.md
     sandbox: read-only
+    review: true
     timeout_seconds: 900
     max_feedback_retries: 2
     output_contract:
@@ -71,6 +74,7 @@ steps:
     kind: codex
     prompt: prompts/terraform_provider_upgrade/custom_config_controller_impact.md
     sandbox: read-only
+    review: true
     timeout_seconds: 900
     max_feedback_retries: 2
     output_contract:
@@ -143,6 +147,7 @@ steps:
     kind: codex
     prompt: prompts/terraform_provider_upgrade/assemble_final_review_packet.md
     sandbox: read-only
+    review: true
     timeout_seconds: 900
     max_feedback_retries: 2
     output_contract:

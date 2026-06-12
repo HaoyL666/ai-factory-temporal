@@ -122,6 +122,7 @@ class ProjectCatalog:
             raise CatalogError(f"{label} has invalid prompt `{prompt}`: {exc}") from exc
 
         self._validate_codex_output_contract(step, label)
+        self._validate_codex_review_config(step, label)
 
     def _validate_approval_step(self, step: dict[str, Any], label: str) -> None:
         message = step.get("message")
@@ -164,6 +165,37 @@ class ProjectCatalog:
                 continue
             if not isinstance(values, list) or not all(_is_non_empty_string(value) for value in values):
                 raise CatalogError(f"{label} output_contract {field_name} must be a list of strings")
+
+    @staticmethod
+    def _validate_codex_review_config(step: dict[str, Any], label: str) -> None:
+        review = step.get("review")
+        if review is None or isinstance(review, bool):
+            return
+        if not isinstance(review, dict):
+            raise CatalogError(f"{label} review must be a boolean or mapping")
+
+        enabled = review.get("enabled")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise CatalogError(f"{label} review.enabled must be a boolean")
+
+        for field_name in ("max_review_iterations", "reviewer_timeout_seconds"):
+            value = review.get(field_name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise CatalogError(f"{label} review.{field_name} must be a positive integer")
+
+        for field_name in ("reviewer_sandbox", "reviewer_approval_mode", "reviewer_model"):
+            value = review.get(field_name)
+            if value is not None and not isinstance(value, str):
+                raise CatalogError(f"{label} review.{field_name} must be a string")
+
+        stub_verdicts = review.get("stub_verdicts")
+        if stub_verdicts is not None and (
+            not isinstance(stub_verdicts, list)
+            or not all(_is_non_empty_string(value) for value in stub_verdicts)
+        ):
+            raise CatalogError(f"{label} review.stub_verdicts must be a list of strings")
 
 
 def _is_non_empty_string(value: Any) -> bool:

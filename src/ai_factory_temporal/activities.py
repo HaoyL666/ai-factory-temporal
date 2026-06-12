@@ -246,6 +246,7 @@ def run_codex_step(payload: dict[str, Any]) -> dict[str, Any]:
 
     store.mark_step_running(workflow_id, step_id, retry_count)
     _codex_output_contract(step)
+    review_config = _codex_review_config(step)
     prompt = render_prompt(
         project_dir=Path(payload["project_dir"]),
         workflow_id=workflow_id,
@@ -259,81 +260,63 @@ def run_codex_step(payload: dict[str, Any]) -> dict[str, Any]:
         retry_feedback=payload.get("retry_feedback"),
         attempt=retry_count + 1,
     )
+
+    if review_config["enabled"]:
+        return _run_reviewed_codex_step(
+            store=store,
+            payload=payload,
+            step=step,
+            workflow_id=workflow_id,
+            step_id=step_id,
+            retry_count=retry_count,
+            artifact_dir=artifact_dir,
+            initial_prompt=prompt,
+            review_config=review_config,
+        )
+
+    return _run_single_codex_step(
+        store=store,
+        payload=payload,
+        step=step,
+        workflow_id=workflow_id,
+        step_id=step_id,
+        retry_count=retry_count,
+        artifact_dir=artifact_dir,
+        prompt=prompt,
+    )
+
+
+def _run_single_codex_step(
+    *,
+    store: SQLiteStore,
+    payload: dict[str, Any],
+    step: dict[str, Any],
+    workflow_id: str,
+    step_id: str,
+    retry_count: int,
+    artifact_dir: Path,
+    prompt: str,
+) -> dict[str, Any]:
     prompt_path = artifact_dir / "codex-prompt.md"
     output_path = artifact_dir / "codex-final-response.md"
     metadata_path = artifact_dir / "codex-sdk-result.json"
-    prompt_path.write_text(prompt, encoding="utf-8")
-
-    if config.CODEX_MODE == "stub":
-        final_response = _stub_codex_response(step, step_id, retry_count)
-        output_path.write_text(final_response, encoding="utf-8")
-        metadata = {"runner": "codex", "mode": "stub", "items_count": 0}
-        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        output = {
-            "runner": "codex",
-            "mode": "stub",
-            "summary": final_response,
-            "prompt": str(prompt_path),
-            "final_response": str(output_path),
-            "metadata": str(metadata_path),
-        }
-        contract_result = _evaluate_codex_output_contract(step, final_response)
-        output["contract"] = contract_result["payload"]
-        output["contract_status"] = contract_result.get("status")
-        if contract_result.get("error"):
-            return _finish_failed(
-                store,
-                workflow_id,
-                step_id,
-                retry_count,
-                artifact_dir,
-                output,
-                contract_result["error"],
-            )
-        store.finish_step(
-            workflow_id=workflow_id,
+    try:
+        turn_output = _run_codex_turn(
+            prompt=prompt,
+            prompt_path=prompt_path,
+            output_path=output_path,
+            metadata_path=metadata_path,
+            payload=payload,
+            step=step,
             step_id=step_id,
-            status=StepStatus.SUCCEEDED.value,
-            output=output,
-            artifact_uri=str(artifact_dir),
             retry_count=retry_count,
+            role="coder",
+            review_iteration=1,
+            sandbox_value=str(step.get("sandbox", config.CODEX_SANDBOX)),
+            approval_mode_value=str(step.get("codex_approval_mode", config.CODEX_APPROVAL_MODE)),
+            model=step.get("model") or config.CODEX_MODEL,
+            timeout_seconds=int(step.get("timeout_seconds", 1800)),
         )
-        return {
-            "step_id": step_id,
-            "status": StepStatus.SUCCEEDED.value,
-            "output": output,
-            "artifact_uri": str(artifact_dir),
-        }
-
-    try:
-        from openai_codex import ApprovalMode, Codex, Sandbox
-    except ImportError as exc:
-        raise RuntimeError("openai-codex is not installed") from exc
-
-    model = step.get("model") or config.CODEX_MODEL
-    sandbox = _sandbox(Sandbox, str(step.get("sandbox", config.CODEX_SANDBOX)))
-    approval_mode = _approval_mode(
-        ApprovalMode,
-        str(step.get("codex_approval_mode", config.CODEX_APPROVAL_MODE)),
-    )
-    timeout_seconds = int(step.get("timeout_seconds", 1800))
-
-    try:
-        with Codex() as codex:
-            thread = codex.thread_start(
-                approval_mode=approval_mode,
-                cwd=payload["workspace_path"],
-                model=model,
-                sandbox=sandbox,
-            )
-            turn = thread.turn(
-                prompt,
-                approval_mode=approval_mode,
-                cwd=payload["workspace_path"],
-                model=model,
-                sandbox=sandbox,
-            )
-            result = _run_turn_with_timeout(turn, timeout_seconds)
     except TimeoutError:
         return _finish_failed(
             store,
@@ -341,31 +324,24 @@ def run_codex_step(payload: dict[str, Any]) -> dict[str, Any]:
             step_id,
             retry_count,
             artifact_dir,
-            {"runner": "codex", "mode": "sdk", "timeout_seconds": timeout_seconds},
-            f"Codex timed out after {timeout_seconds} seconds",
+            {
+                "runner": "codex",
+                "mode": _codex_mode_name(),
+                "timeout_seconds": int(step.get("timeout_seconds", 1800)),
+            },
+            f"Codex timed out after {int(step.get('timeout_seconds', 1800))} seconds",
         )
 
-    final_response = getattr(result, "final_response", None) or ""
-    output_path.write_text(final_response, encoding="utf-8")
-    metadata = {
-        "runner": "codex",
-        "mode": "sdk",
-        "thread_id": getattr(thread, "id", None),
-        "turn_id": getattr(result, "id", None),
-        "duration_ms": getattr(result, "duration_ms", None),
-        "items_count": len(getattr(result, "items", []) or []),
-        "usage": _json_safe(getattr(result, "usage", None)),
-    }
-    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    final_response = turn_output["final_response"]
     output = {
         "runner": "codex",
-        "mode": "sdk",
+        "mode": turn_output["metadata"]["mode"],
         "summary": final_response[:2000],
         "prompt": str(prompt_path),
         "final_response": str(output_path),
         "metadata": str(metadata_path),
-        "thread_id": metadata["thread_id"],
-        "turn_id": metadata["turn_id"],
+        "thread_id": turn_output["metadata"].get("thread_id"),
+        "turn_id": turn_output["metadata"].get("turn_id"),
     }
     contract_result = _evaluate_codex_output_contract(step, final_response)
     output["contract"] = contract_result["payload"]
@@ -394,6 +370,599 @@ def run_codex_step(payload: dict[str, Any]) -> dict[str, Any]:
         "output": output,
         "artifact_uri": str(artifact_dir),
     }
+
+
+def _run_reviewed_codex_step(
+    *,
+    store: SQLiteStore,
+    payload: dict[str, Any],
+    step: dict[str, Any],
+    workflow_id: str,
+    step_id: str,
+    retry_count: int,
+    artifact_dir: Path,
+    initial_prompt: str,
+    review_config: dict[str, Any],
+) -> dict[str, Any]:
+    review_history: list[dict[str, Any]] = []
+    coder_prompt = initial_prompt
+    max_iterations = int(review_config["max_review_iterations"])
+
+    for review_iteration in range(1, max_iterations + 1):
+        iteration_dir = artifact_dir / f"review-{review_iteration}"
+        iteration_dir.mkdir(parents=True, exist_ok=True)
+
+        coder_prompt_path = iteration_dir / "coder-prompt.md"
+        coder_output_path = iteration_dir / "coder-final-response.md"
+        coder_metadata_path = iteration_dir / "coder-sdk-result.json"
+        coder_contract_path = iteration_dir / "coder-contract.json"
+        reviewer_prompt_path = iteration_dir / "reviewer-prompt.md"
+        reviewer_output_path = iteration_dir / "reviewer-final-response.md"
+        reviewer_metadata_path = iteration_dir / "reviewer-sdk-result.json"
+        reviewer_contract_path = iteration_dir / "reviewer-contract.json"
+
+        try:
+            coder_turn = _run_codex_turn(
+                prompt=coder_prompt,
+                prompt_path=coder_prompt_path,
+                output_path=coder_output_path,
+                metadata_path=coder_metadata_path,
+                payload=payload,
+                step=step,
+                step_id=step_id,
+                retry_count=retry_count,
+                role="coder",
+                review_iteration=review_iteration,
+                sandbox_value=str(step.get("sandbox", config.CODEX_SANDBOX)),
+                approval_mode_value=str(
+                    step.get("codex_approval_mode", config.CODEX_APPROVAL_MODE)
+                ),
+                model=step.get("model") or config.CODEX_MODEL,
+                timeout_seconds=int(step.get("timeout_seconds", 1800)),
+            )
+        except TimeoutError:
+            return _finish_reviewed_codex_failure(
+                store=store,
+                workflow_id=workflow_id,
+                step_id=step_id,
+                retry_count=retry_count,
+                artifact_dir=artifact_dir,
+                review_history=review_history,
+                error=(
+                    "Codex coder timed out after "
+                    f"{int(step.get('timeout_seconds', 1800))} seconds"
+                ),
+            )
+
+        coder_contract = _evaluate_codex_output_contract(step, coder_turn["final_response"])
+        _write_json(coder_contract_path, coder_contract)
+        if coder_contract.get("error"):
+            return _finish_reviewed_codex_failure(
+                store=store,
+                workflow_id=workflow_id,
+                step_id=step_id,
+                retry_count=retry_count,
+                artifact_dir=artifact_dir,
+                review_history=review_history,
+                error=str(coder_contract["error"]),
+                coder_contract=coder_contract,
+            )
+
+        reviewer_prompt = _build_reviewer_prompt(
+            original_prompt=initial_prompt,
+            coder_prompt=coder_prompt,
+            coder_response=coder_turn["final_response"],
+            coder_contract=coder_contract["payload"],
+            workspace_path=payload["workspace_path"],
+            review_history=review_history,
+        )
+        try:
+            reviewer_turn = _run_codex_turn(
+                prompt=reviewer_prompt,
+                prompt_path=reviewer_prompt_path,
+                output_path=reviewer_output_path,
+                metadata_path=reviewer_metadata_path,
+                payload=payload,
+                step=step,
+                step_id=step_id,
+                retry_count=retry_count,
+                role="reviewer",
+                review_iteration=review_iteration,
+                sandbox_value=str(review_config["reviewer_sandbox"]),
+                approval_mode_value=str(review_config["reviewer_approval_mode"]),
+                model=(
+                    review_config.get("reviewer_model")
+                    or step.get("model")
+                    or config.CODEX_MODEL
+                ),
+                timeout_seconds=int(review_config["reviewer_timeout_seconds"]),
+            )
+        except TimeoutError:
+            return _finish_reviewed_codex_failure(
+                store=store,
+                workflow_id=workflow_id,
+                step_id=step_id,
+                retry_count=retry_count,
+                artifact_dir=artifact_dir,
+                review_history=review_history,
+                error=(
+                    "Codex reviewer timed out after "
+                    f"{int(review_config['reviewer_timeout_seconds'])} seconds"
+                ),
+                coder_contract=coder_contract,
+            )
+
+        review_contract = _evaluate_codex_review_contract(reviewer_turn["final_response"])
+        _write_json(reviewer_contract_path, review_contract)
+        history_entry = {
+            "review_iteration": review_iteration,
+            "verdict": review_contract.get("verdict"),
+            "coder_contract": str(coder_contract_path),
+            "reviewer_contract": str(reviewer_contract_path),
+            "coder_prompt": str(coder_prompt_path),
+            "coder_response": str(coder_output_path),
+            "reviewer_prompt": str(reviewer_prompt_path),
+            "reviewer_response": str(reviewer_output_path),
+        }
+        review_history.append(history_entry)
+
+        if review_contract.get("error"):
+            return _finish_reviewed_codex_failure(
+                store=store,
+                workflow_id=workflow_id,
+                step_id=step_id,
+                retry_count=retry_count,
+                artifact_dir=artifact_dir,
+                review_history=review_history,
+                error=str(review_contract["error"]),
+                coder_contract=coder_contract,
+                reviewer_contract=review_contract,
+            )
+
+        if review_contract["verdict"] == "APPROVED":
+            return _finish_reviewed_codex_success(
+                store=store,
+                workflow_id=workflow_id,
+                step_id=step_id,
+                retry_count=retry_count,
+                artifact_dir=artifact_dir,
+                review_history=review_history,
+                coder_contract=coder_contract,
+                reviewer_contract=review_contract,
+            )
+
+        if (
+            review_contract["verdict"] == "CHANGES_REQUESTED"
+            and review_iteration < max_iterations
+        ):
+            coder_prompt = _build_repair_prompt(
+                original_prompt=initial_prompt,
+                review_history=review_history,
+                coder_contract=coder_contract["payload"],
+                reviewer_contract=review_contract["payload"],
+            )
+            continue
+
+        return _finish_reviewed_codex_failure(
+            store=store,
+            workflow_id=workflow_id,
+            step_id=step_id,
+            retry_count=retry_count,
+            artifact_dir=artifact_dir,
+            review_history=review_history,
+            error=(
+                "Codex review rejected final attempt: "
+                f"{review_contract['payload'].get('summary') or review_contract['verdict']}"
+            ),
+            coder_contract=coder_contract,
+            reviewer_contract=review_contract,
+        )
+
+    return _finish_reviewed_codex_failure(
+        store=store,
+        workflow_id=workflow_id,
+        step_id=step_id,
+        retry_count=retry_count,
+        artifact_dir=artifact_dir,
+        review_history=review_history,
+        error="Codex review loop ended without an approval verdict",
+    )
+
+
+def _run_codex_turn(
+    *,
+    prompt: str,
+    prompt_path: Path,
+    output_path: Path,
+    metadata_path: Path,
+    payload: dict[str, Any],
+    step: dict[str, Any],
+    step_id: str,
+    retry_count: int,
+    role: str,
+    review_iteration: int,
+    sandbox_value: str,
+    approval_mode_value: str,
+    model: str | None,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    prompt_path.write_text(prompt, encoding="utf-8")
+
+    if config.CODEX_MODE == "stub":
+        final_response = _stub_codex_response(
+            step,
+            step_id,
+            retry_count,
+            role=role,
+            review_iteration=review_iteration,
+        )
+        output_path.write_text(final_response, encoding="utf-8")
+        metadata = {
+            "runner": "codex",
+            "mode": "stub",
+            "role": role,
+            "review_iteration": review_iteration,
+            "items_count": 0,
+        }
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return {"final_response": final_response, "metadata": metadata}
+
+    try:
+        from openai_codex import ApprovalMode, Codex, Sandbox
+    except ImportError as exc:
+        raise RuntimeError("openai-codex is not installed") from exc
+
+    sandbox = _sandbox(Sandbox, sandbox_value)
+    approval_mode = _approval_mode(ApprovalMode, approval_mode_value)
+    try:
+        with Codex() as codex:
+            thread = codex.thread_start(
+                approval_mode=approval_mode,
+                cwd=payload["workspace_path"],
+                model=model,
+                sandbox=sandbox,
+            )
+            turn = thread.turn(
+                prompt,
+                approval_mode=approval_mode,
+                cwd=payload["workspace_path"],
+                model=model,
+                sandbox=sandbox,
+            )
+            result = _run_turn_with_timeout(turn, timeout_seconds)
+    except TimeoutError:
+        raise
+
+    final_response = getattr(result, "final_response", None) or ""
+    output_path.write_text(final_response, encoding="utf-8")
+    metadata = {
+        "runner": "codex",
+        "mode": "sdk",
+        "role": role,
+        "review_iteration": review_iteration,
+        "thread_id": getattr(thread, "id", None),
+        "turn_id": getattr(result, "id", None),
+        "duration_ms": getattr(result, "duration_ms", None),
+        "items_count": len(getattr(result, "items", []) or []),
+        "usage": _json_safe(getattr(result, "usage", None)),
+    }
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return {"final_response": final_response, "metadata": metadata}
+
+
+def _finish_reviewed_codex_success(
+    *,
+    store: SQLiteStore,
+    workflow_id: str,
+    step_id: str,
+    retry_count: int,
+    artifact_dir: Path,
+    review_history: list[dict[str, Any]],
+    coder_contract: dict[str, Any],
+    reviewer_contract: dict[str, Any],
+) -> dict[str, Any]:
+    final_contract = _reviewed_step_contract(
+        status="SUCCEEDED",
+        artifact_dir=artifact_dir,
+        review_history=review_history,
+        coder_contract=coder_contract,
+        reviewer_contract=reviewer_contract,
+        error=None,
+    )
+    output = _reviewed_step_output(artifact_dir, final_contract, review_history)
+    _write_json(artifact_dir / "step-result.json", output)
+    store.finish_step(
+        workflow_id=workflow_id,
+        step_id=step_id,
+        status=StepStatus.SUCCEEDED.value,
+        output=output,
+        artifact_uri=str(artifact_dir),
+        retry_count=retry_count,
+    )
+    return {
+        "step_id": step_id,
+        "status": StepStatus.SUCCEEDED.value,
+        "output": output,
+        "artifact_uri": str(artifact_dir),
+    }
+
+
+def _finish_reviewed_codex_failure(
+    *,
+    store: SQLiteStore,
+    workflow_id: str,
+    step_id: str,
+    retry_count: int,
+    artifact_dir: Path,
+    review_history: list[dict[str, Any]],
+    error: str,
+    coder_contract: dict[str, Any] | None = None,
+    reviewer_contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    final_contract = _reviewed_step_contract(
+        status="FAILED",
+        artifact_dir=artifact_dir,
+        review_history=review_history,
+        coder_contract=coder_contract,
+        reviewer_contract=reviewer_contract,
+        error=error,
+    )
+    output = _reviewed_step_output(artifact_dir, final_contract, review_history)
+    _write_json(artifact_dir / "step-result.json", output)
+    return _finish_failed(
+        store,
+        workflow_id,
+        step_id,
+        retry_count,
+        artifact_dir,
+        output,
+        error,
+    )
+
+
+def _reviewed_step_contract(
+    *,
+    status: str,
+    artifact_dir: Path,
+    review_history: list[dict[str, Any]],
+    coder_contract: dict[str, Any] | None,
+    reviewer_contract: dict[str, Any] | None,
+    error: str | None,
+) -> dict[str, Any]:
+    coder_payload = (coder_contract or {}).get("payload") or {}
+    reviewer_payload = (reviewer_contract or {}).get("payload") or {}
+    final_verdict = (reviewer_contract or {}).get("verdict")
+    review_iterations = len(review_history)
+
+    if status == "SUCCEEDED":
+        summary = (
+            f"Codex step passed review after {review_iterations} review iteration(s). "
+            f"{coder_payload.get('summary', '')}"
+        ).strip()
+    else:
+        summary = f"Codex step failed review after {review_iterations} review iteration(s)."
+
+    evidence = _as_list(coder_payload.get("evidence"))
+    evidence.extend(
+        [
+            str(artifact_dir / "step-result.json"),
+            *[entry["coder_contract"] for entry in review_history],
+            *[entry["reviewer_contract"] for entry in review_history],
+        ]
+    )
+    checks = _as_list(coder_payload.get("checks"))
+    if status == "SUCCEEDED":
+        checks.append("reviewer approved final attempt")
+
+    return {
+        "status": status,
+        "summary": summary,
+        "changed_files": _as_list(coder_payload.get("changed_files")),
+        "checks": checks,
+        "evidence": evidence,
+        "risks": _as_list(coder_payload.get("risks")),
+        "error": error,
+        "review": {
+            "enabled": True,
+            "final_verdict": final_verdict,
+            "review_iterations": review_iterations,
+            "repair_attempts": max(0, review_iterations - 1),
+            "history": [
+                {
+                    "review_iteration": entry["review_iteration"],
+                    "verdict": entry.get("verdict"),
+                    "coder_contract": entry["coder_contract"],
+                    "reviewer_contract": entry["reviewer_contract"],
+                }
+                for entry in review_history
+            ],
+        },
+        "coder_contract": coder_payload,
+        "reviewer_contract": reviewer_payload,
+    }
+
+
+def _reviewed_step_output(
+    artifact_dir: Path,
+    final_contract: dict[str, Any],
+    review_history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "runner": "codex",
+        "mode": _codex_mode_name(),
+        "summary": final_contract["summary"],
+        "contract": final_contract,
+        "contract_status": final_contract["status"],
+        "review": final_contract["review"],
+        "review_history": review_history,
+        "artifact_uri": str(artifact_dir),
+        "step_result": str(artifact_dir / "step-result.json"),
+    }
+
+
+def _build_reviewer_prompt(
+    *,
+    original_prompt: str,
+    coder_prompt: str,
+    coder_response: str,
+    coder_contract: dict[str, Any],
+    workspace_path: str,
+    review_history: list[dict[str, Any]],
+) -> str:
+    return f"""# Codex Review Step
+
+You are the read-only reviewer for a Codex coding step. Review the coder result,
+current workspace diff, and prior review history. Do not edit files.
+
+## Original Task Prompt
+
+{original_prompt}
+
+## Coder Prompt For This Iteration
+
+{coder_prompt}
+
+## Coder Final Response
+
+{coder_response}
+
+## Coder Contract
+
+```json
+{json.dumps(coder_contract, indent=2, sort_keys=True)}
+```
+
+## Current Workspace Diff
+
+```diff
+{_workspace_diff(Path(workspace_path))}
+```
+
+## Prior Review History
+
+```json
+{json.dumps(review_history, indent=2, sort_keys=True)}
+```
+
+## Review Contract
+
+Respond with exactly one JSON object and no surrounding Markdown:
+
+```json
+{{
+  "status": "SUCCEEDED",
+  "verdict": "APPROVED",
+  "summary": "Concise review summary.",
+  "findings": [],
+  "required_fixes": [],
+  "error": null
+}}
+```
+
+Use `"verdict": "CHANGES_REQUESTED"` when the coder must repair the result.
+Use `"verdict": "BLOCKED"` when review cannot be completed safely.
+"""
+
+
+def _build_repair_prompt(
+    *,
+    original_prompt: str,
+    review_history: list[dict[str, Any]],
+    coder_contract: dict[str, Any],
+    reviewer_contract: dict[str, Any],
+) -> str:
+    return f"""# Codex Repair Attempt
+
+Continue the original task by addressing the reviewer feedback. Keep the patch
+scoped and do not redo unrelated work.
+
+## Original Task Prompt
+
+{original_prompt}
+
+## Previous Coder Contract
+
+```json
+{json.dumps(coder_contract, indent=2, sort_keys=True)}
+```
+
+## Reviewer Feedback
+
+```json
+{json.dumps(reviewer_contract, indent=2, sort_keys=True)}
+```
+
+## Review History
+
+```json
+{json.dumps(review_history, indent=2, sort_keys=True)}
+```
+
+Return the same coder output contract required by the original task.
+"""
+
+
+def _evaluate_codex_review_contract(final_response: str) -> dict[str, Any]:
+    try:
+        payload = _extract_json_object(final_response)
+    except ValueError as exc:
+        return {
+            "payload": {},
+            "status": None,
+            "verdict": None,
+            "error": f"Codex review contract violation: {exc}",
+        }
+
+    status_value = payload.get("status")
+    if not isinstance(status_value, str) or not status_value.strip():
+        return {
+            "payload": payload,
+            "status": None,
+            "verdict": None,
+            "error": "Codex review contract violation: missing string field `status`",
+        }
+    status = status_value.strip().upper().replace("-", "_")
+    if status not in {"SUCCEEDED", "SUCCESS", "OK"}:
+        return {
+            "payload": payload,
+            "status": status,
+            "verdict": None,
+            "error": str(payload.get("error") or payload.get("summary") or status_value),
+        }
+
+    verdict_value = payload.get("verdict")
+    if not isinstance(verdict_value, str) or not verdict_value.strip():
+        return {
+            "payload": payload,
+            "status": status,
+            "verdict": None,
+            "error": "Codex review contract violation: missing string field `verdict`",
+        }
+    verdict = verdict_value.strip().upper().replace("-", "_")
+    verdict_aliases = {
+        "PASS": "APPROVED",
+        "PASSED": "APPROVED",
+        "ACCEPTED": "APPROVED",
+        "APPROVE": "APPROVED",
+        "REJECTED": "CHANGES_REQUESTED",
+        "NEEDS_CHANGES": "CHANGES_REQUESTED",
+        "NEEDS_FEEDBACK": "CHANGES_REQUESTED",
+    }
+    verdict = verdict_aliases.get(verdict, verdict)
+    if verdict not in {"APPROVED", "CHANGES_REQUESTED", "BLOCKED"}:
+        return {
+            "payload": payload,
+            "status": status,
+            "verdict": verdict,
+            "error": f"Codex review contract violation: unsupported verdict `{verdict_value}`",
+        }
+    return {"payload": payload, "status": status, "verdict": verdict, "error": None}
 
 
 def _finish_failed(
@@ -497,7 +1066,108 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def _stub_codex_response(step: dict[str, Any], step_id: str, retry_count: int) -> str:
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _codex_mode_name() -> str:
+    return "stub" if config.CODEX_MODE == "stub" else "sdk"
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _workspace_diff(workspace_path: Path) -> str:
+    if not (workspace_path / ".git").exists():
+        return ""
+    try:
+        completed = subprocess.run(
+            ["git", "diff", "--", "."],
+            cwd=workspace_path,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if completed.returncode != 0:
+        return completed.stderr[:4000]
+    return completed.stdout[:20000]
+
+
+def _codex_review_config(step: dict[str, Any]) -> dict[str, Any]:
+    review = step.get("review", False)
+    if review in (None, False):
+        return {"enabled": False}
+    if review is True:
+        review = {}
+    if not isinstance(review, dict):
+        raise ValueError("Codex review config must be a boolean or mapping")
+
+    enabled = bool(review.get("enabled", True))
+    if not enabled:
+        return {"enabled": False}
+
+    max_review_iterations = review.get("max_review_iterations", 2)
+    max_review_iterations = int(max_review_iterations)
+    if max_review_iterations < 1:
+        raise ValueError("Codex review max_review_iterations must be positive")
+
+    return {
+        "enabled": True,
+        "max_review_iterations": max_review_iterations,
+        "reviewer_sandbox": review.get("reviewer_sandbox", "read-only"),
+        "reviewer_approval_mode": review.get("reviewer_approval_mode", "deny_all"),
+        "reviewer_timeout_seconds": int(review.get("reviewer_timeout_seconds", 900)),
+        "reviewer_model": review.get("reviewer_model"),
+        "stub_verdicts": review.get("stub_verdicts"),
+    }
+
+
+def _stub_codex_response(
+    step: dict[str, Any],
+    step_id: str,
+    retry_count: int,
+    *,
+    role: str = "coder",
+    review_iteration: int = 1,
+) -> str:
+    if role == "reviewer":
+        review_config = _codex_review_config(step)
+        verdicts = review_config.get("stub_verdicts") or ["APPROVED"]
+        verdict = str(verdicts[min(review_iteration - 1, len(verdicts) - 1)])
+        verdict = verdict.upper().replace("-", "_")
+        findings = []
+        required_fixes = []
+        if verdict == "CHANGES_REQUESTED":
+            findings = [
+                {
+                    "severity": "medium",
+                    "issue": "Stub reviewer requested one repair iteration.",
+                    "required_fix": "Run another coder iteration.",
+                }
+            ]
+            required_fixes = ["Run another coder iteration."]
+        return json.dumps(
+            {
+                "status": "SUCCEEDED",
+                "verdict": verdict,
+                "summary": f"CODEX_STUB_REVIEW_{verdict} for {step_id}",
+                "findings": findings,
+                "required_fixes": required_fixes,
+                "error": None,
+                "review_iteration": review_iteration,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
     return json.dumps(
         {
             "status": "SUCCEEDED",
@@ -506,6 +1176,7 @@ def _stub_codex_response(step: dict[str, Any], step_id: str, retry_count: int) -
             "checks": ["stub mode returned a contract-compliant response"],
             "error": None,
             "attempt": retry_count + 1,
+            "review_iteration": review_iteration,
         },
         indent=2,
         sort_keys=True,

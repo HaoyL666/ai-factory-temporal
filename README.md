@@ -320,6 +320,55 @@ contract-declared failures are business failures and move into the feedback path
 Codex SDK/runtime exceptions are system failures and surface through Temporal's
 task/activity failure retry behavior.
 
+## Codex Review Loop
+
+Codex steps can opt into an internal coder/reviewer loop:
+
+```yaml
+- id: implement_change
+  kind: codex
+  prompt: prompts/task/implement_change.md
+  review: true
+```
+
+Use `review: { enabled: true, max_review_iterations: 3 }` when a step needs a
+custom repair cap. When review is enabled, one outer Temporal step can run
+multiple internal review iterations:
+
+```text
+attempt-1/
+  review-1/
+    coder-prompt.md
+    coder-final-response.md
+    coder-contract.json
+    reviewer-prompt.md
+    reviewer-final-response.md
+    reviewer-contract.json
+  review-2/
+    ...
+  step-result.json
+```
+
+The coder still returns the normal Codex output contract. The reviewer runs in
+read-only mode by default and returns:
+
+```json
+{
+  "status": "SUCCEEDED",
+  "verdict": "APPROVED",
+  "summary": "Concise review summary.",
+  "findings": [],
+  "required_fixes": [],
+  "error": null
+}
+```
+
+`APPROVED` finishes the Codex step. `CHANGES_REQUESTED` starts another coder
+repair iteration until `max_review_iterations` is reached. A final rejection or
+blocked review makes the step fail and moves the workflow to the normal feedback
+path. The DB stores one synthesized final step contract; the artifacts preserve
+every coder and reviewer contract.
+
 ## E2E Smoke Workflows
 
 The sample `generic-project` includes a few local smoke workflows:
