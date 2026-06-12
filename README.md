@@ -1,7 +1,8 @@
 # Local AI Factory With Temporal
 
-This is a separate Temporal-based prototype for the AI Factory workflow harness.
-It keeps the current `ai-workflow-harness` project untouched.
+Local AI Factory runtime for executing project-specific AI workflows with
+Temporal, FastAPI, SQLite, Codex SDK activities, deterministic script steps,
+approval gates, and feedback loops.
 
 The runtime shape is:
 
