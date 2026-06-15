@@ -12,8 +12,8 @@ Inspect the repository and identify:
 
 - target Terraform provider version from inputs
 - current `TERRAFORM_PROVIDER_VERSION` value in `Makefile`
-- validation level, defaulting to `L1_BUILD_GENERATE`
-- excluded or approval-required actions
+- requested execution mode, defaulting to `plan_only`
+- protected actions that must stay behind approval gates
 - evidence destinations and artifact expectations
 - likely generated surfaces that may move
 
@@ -23,6 +23,6 @@ confirmation.
 ## Expected Evidence
 
 Include the source-of-truth files found, current version, requested target
-version, validation level, and the initial risk/approval classification.
+version, execution mode, and initial risk classification.
 
 {{include:prompts/_shared/status_contract.md}}

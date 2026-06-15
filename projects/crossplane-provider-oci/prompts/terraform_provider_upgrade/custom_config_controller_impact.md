@@ -29,6 +29,6 @@ Return a custom impact report that separates:
 - still valid custom behavior
 - required patches
 - service-owner input
-- blocked or approval-required areas
+- blocked areas or approval-gated follow-up
 
 {{include:prompts/_shared/status_contract.md}}

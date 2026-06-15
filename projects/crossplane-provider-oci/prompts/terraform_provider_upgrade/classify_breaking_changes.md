@@ -6,8 +6,9 @@
 
 ## Task
 
-Review generated diffs and deterministic evidence from previous steps. Identify
-customer-facing risk without treating all generated churn as a breaking change.
+Review the generation diff and deterministic evidence from previous steps.
+Identify customer-facing risk without treating all generated churn as a breaking
+change.
 
 Classify meaningful movement in:
 
@@ -21,8 +22,8 @@ Do not edit files in this step.
 
 ## Expected Evidence
 
-Return a breaking-change report with severity, affected service/resource,
-owner action, compatibility notes, and whether the workflow should escalate to
-install or live OCI validation.
+Return a breaking-change report with severity, affected service/resource, owner
+action, compatibility notes, and whether install or live OCI validation should
+be requested.
 
 {{include:prompts/_shared/status_contract.md}}

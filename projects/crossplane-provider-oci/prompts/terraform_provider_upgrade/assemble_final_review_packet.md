@@ -16,7 +16,7 @@ The packet should include:
 - generated diff summary
 - breaking-change report
 - custom config/controller impact report
-- validation matrix and evidence
+- generation diff evidence
 - build, test, package, publish, install, and live OCI gate outcomes
 - redaction status
 - rollback notes
