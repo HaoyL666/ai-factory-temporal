@@ -5,13 +5,15 @@ import unittest
 from pathlib import Path
 
 from ai_factory_temporal import activities, config
-from ai_factory_temporal.activities import (
-    _build_repair_prompt,
-    _build_reviewer_prompt,
-    _evaluate_codex_output_contract,
-    _evaluate_codex_review_contract,
-    _repair_context,
-    run_codex_step,
+from ai_factory_temporal.activities import run_codex_step
+from ai_factory_temporal.codex_contracts import (
+    evaluate_codex_output_contract as _evaluate_codex_output_contract,
+    evaluate_codex_review_contract as _evaluate_codex_review_contract,
+)
+from ai_factory_temporal.review_prompts import (
+    build_repair_prompt as _build_repair_prompt,
+    build_reviewer_prompt as _build_reviewer_prompt,
+    repair_context as _repair_context,
 )
 from ai_factory_temporal.catalog import ProjectCatalog
 from ai_factory_temporal.models import StepStatus
@@ -161,8 +163,20 @@ class CodexContractTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result["status"], StepStatus.SUCCEEDED.value)
+                self.assertEqual(result["output"]["kind"], "codex")
+                self.assertEqual(result["output"]["status"], StepStatus.SUCCEEDED.value)
+                self.assertEqual(
+                    result["output"]["summary"],
+                    "CODEX_STUB_DONE for codex_edit_file",
+                )
                 self.assertEqual(result["output"]["contract_status"], "SUCCEEDED")
                 self.assertEqual(result["output"]["contract"]["status"], "SUCCEEDED")
+                artifact_uri = Path(result["artifact_uri"])
+                self.assertTrue((artifact_uri / "step-result.json").exists())
+                self.assertEqual(
+                    result["output"]["step_result"],
+                    str(artifact_uri / "step-result.json"),
+                )
         finally:
             activities.config.CODEX_MODE = old_mode
 
@@ -176,6 +190,8 @@ class CodexContractTest(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], StepStatus.SUCCEEDED.value)
+        self.assertEqual(result["output"]["kind"], "codex")
+        self.assertEqual(result["output"]["status"], StepStatus.SUCCEEDED.value)
         self.assertEqual(result["output"]["contract_status"], "SUCCEEDED")
         self.assertEqual(result["output"]["review"]["final_verdict"], "APPROVED")
         self.assertEqual(result["output"]["review"]["review_rounds"], 1)
@@ -271,7 +287,10 @@ class CodexContractTest(unittest.TestCase):
         self.assertIn("## Original Task Prompt", prompt)
         self.assertIn("## Current Coder Round", prompt)
         self.assertIn('"round_type": "repair"', prompt)
-        self.assertIn('"coder_prompt_artifact": "/artifacts/review-round-2/coder-prompt.md"', prompt)
+        self.assertIn(
+            '"coder_prompt_artifact": "/artifacts/review-round-2/coder-prompt.md"',
+            prompt,
+        )
         self.assertIn("## Repair Context", prompt)
         self.assertIn("## Reviewer Feedback Being Addressed", prompt)
         self.assertIn("## Current Workspace Diff", prompt)

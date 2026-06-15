@@ -321,6 +321,26 @@ contract-declared failures are business failures and move into the feedback path
 Codex SDK/runtime exceptions are system failures and surface through Temporal's
 task/activity failure retry behavior.
 
+## Deterministic Step Artifacts
+
+Script steps receive a harness-created artifact directory:
+
+```text
+AI_FACTORY_ARTIFACT_DIR=var/artifacts/<workflow_id>/<step_id>/step-run-N
+```
+
+The script can write any files there. The harness always captures `stdout.log`
+and `stderr.log`, scans the artifact directory, writes `artifact-manifest.json`,
+and writes a normalized `step-result.json`.
+
+If the script also writes `result.json`, the harness includes it as
+`script_result` in the normalized step output. This is optional; simple scripts
+can just exit `0` or nonzero and write whatever evidence files they have.
+
+Later Codex steps receive previous step outputs with the artifact directory,
+manifest path, and discovered artifact list, so prompts do not need to hardcode
+every deterministic output file name.
+
 ## Codex Review Loop
 
 Codex steps can opt into an internal coder/reviewer loop:

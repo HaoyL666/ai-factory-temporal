@@ -19,7 +19,8 @@ Do not remove existing content. Do not edit unrelated files.
 
 This step intentionally tests the internal Codex review loop.
 
-If this prompt does not contain a `## Reviewer Feedback` section:
+If this prompt does not contain a `### Reviewer Feedback Being Addressed`
+section under `## Repair Context`:
 
 - Append only this line if it is not already present:
 
@@ -30,7 +31,8 @@ If this prompt does not contain a `## Reviewer Feedback` section:
 - Do not append `{{input.review_repair_marker}}` yet.
 - Return a `SUCCEEDED` contract so the reviewer has to catch the missing final marker.
 
-If this prompt contains a `## Reviewer Feedback` section:
+If this prompt contains a `### Reviewer Feedback Being Addressed` section
+under `## Repair Context`:
 
 - Append this line if it is not already present:
 

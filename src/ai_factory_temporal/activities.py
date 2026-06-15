@@ -2,18 +2,39 @@ from __future__ import annotations
 
 import json
 import os
-import queue
-import re
 import subprocess
-import threading
 from pathlib import Path
 from typing import Any
 
 from temporalio import activity
 
 from ai_factory_temporal import config
+from ai_factory_temporal.artifacts import (
+    ARTIFACT_MANIFEST_FILENAME,
+    SCRIPT_RESULT_FILENAME,
+    STEP_RESULT_FILENAME,
+    build_artifact_manifest,
+    load_optional_json_object,
+    write_json as write_artifact_json,
+)
+from ai_factory_temporal.codex_contracts import (
+    as_list as _as_list,
+    codex_output_contract as _codex_output_contract,
+    evaluate_codex_output_contract as _evaluate_codex_output_contract,
+    evaluate_codex_review_contract as _evaluate_codex_review_contract,
+)
+from ai_factory_temporal.codex_runner import (
+    codex_mode_name as _codex_mode_name,
+    codex_review_config as _codex_review_config,
+    run_codex_turn as _run_codex_turn,
+)
 from ai_factory_temporal.models import StepStatus
 from ai_factory_temporal.prompting import render_prompt
+from ai_factory_temporal.review_prompts import (
+    build_repair_prompt as _build_repair_prompt,
+    build_reviewer_prompt as _build_reviewer_prompt,
+    repair_context as _repair_context,
+)
 from ai_factory_temporal.store import SQLiteStore
 
 
@@ -158,7 +179,9 @@ def run_script_step(payload: dict[str, Any]) -> dict[str, Any]:
         _replace_placeholders(str(part), payload, artifact_dir)
         for part in command
     ]
-    cwd = Path(_replace_placeholders(str(step.get("cwd", "{{workspace_path}}")), payload, artifact_dir))
+    cwd = Path(
+        _replace_placeholders(str(step.get("cwd", "{{workspace_path}}")), payload, artifact_dir)
+    )
     env = os.environ.copy()
     env.update(
         {
@@ -184,16 +207,27 @@ def run_script_step(payload: dict[str, Any]) -> dict[str, Any]:
             cwd=cwd,
             env=env,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=timeout_seconds,
             check=False,
         )
-    except subprocess.TimeoutExpired:
-        output = {
-            "runner": "script",
-            "command": resolved_command,
-            "timeout_seconds": timeout_seconds,
-        }
+    except subprocess.TimeoutExpired as exc:
+        stdout_path.write_text(_timeout_stream(exc.stdout), encoding="utf-8")
+        stderr_path.write_text(_timeout_stream(exc.stderr), encoding="utf-8")
+        error = f"script timed out after {timeout_seconds} seconds"
+        output = _script_step_output(
+            step=step,
+            status=StepStatus.FAILED.value,
+            artifact_dir=artifact_dir,
+            command=resolved_command,
+            returncode=None,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            timeout_seconds=timeout_seconds,
+            error=error,
+        )
         return _finish_failed(
             store,
             workflow_id,
@@ -201,19 +235,24 @@ def run_script_step(payload: dict[str, Any]) -> dict[str, Any]:
             feedback_retry_count,
             artifact_dir,
             output,
-            f"script timed out after {timeout_seconds} seconds",
+            error,
         )
 
     stdout_path.write_text(completed.stdout, encoding="utf-8")
     stderr_path.write_text(completed.stderr, encoding="utf-8")
-    output = {
-        "runner": step.get("runner", "script"),
-        "command": resolved_command,
-        "returncode": completed.returncode,
-        "stdout": str(stdout_path),
-        "stderr": str(stderr_path),
-    }
     if completed.returncode != 0:
+        error = f"script failed with exit code {completed.returncode}"
+        output = _script_step_output(
+            step=step,
+            status=StepStatus.FAILED.value,
+            artifact_dir=artifact_dir,
+            command=resolved_command,
+            returncode=completed.returncode,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            timeout_seconds=timeout_seconds,
+            error=error,
+        )
         return _finish_failed(
             store,
             workflow_id,
@@ -221,9 +260,20 @@ def run_script_step(payload: dict[str, Any]) -> dict[str, Any]:
             feedback_retry_count,
             artifact_dir,
             output,
-            f"script failed with exit code {completed.returncode}",
+            error,
         )
 
+    output = _script_step_output(
+        step=step,
+        status=StepStatus.SUCCEEDED.value,
+        artifact_dir=artifact_dir,
+        command=resolved_command,
+        returncode=completed.returncode,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        timeout_seconds=timeout_seconds,
+        error=None,
+    )
     store.finish_step(
         workflow_id=workflow_id,
         step_id=step_id,
@@ -346,6 +396,8 @@ def _run_single_codex_step(
     final_response = turn_output["final_response"]
     output = {
         "runner": "codex",
+        "kind": "codex",
+        "status": StepStatus.SUCCEEDED.value,
         "mode": turn_output["metadata"]["mode"],
         "summary": final_response[:2000],
         "prompt": str(prompt_path),
@@ -357,6 +409,8 @@ def _run_single_codex_step(
     contract_result = _evaluate_codex_output_contract(step, final_response)
     output["contract"] = contract_result["payload"]
     output["contract_status"] = contract_result.get("status")
+    if isinstance(contract_result["payload"].get("summary"), str):
+        output["summary"] = contract_result["payload"]["summary"]
     if contract_result.get("error"):
         return _finish_failed(
             store,
@@ -367,6 +421,9 @@ def _run_single_codex_step(
             output,
             contract_result["error"],
         )
+    output["artifact_uri"] = str(artifact_dir)
+    output["step_result"] = str(artifact_dir / STEP_RESULT_FILENAME)
+    _write_json(artifact_dir / STEP_RESULT_FILENAME, output)
     store.finish_step(
         workflow_id=workflow_id,
         step_id=step_id,
@@ -592,93 +649,6 @@ def _run_reviewed_codex_step(
     )
 
 
-def _run_codex_turn(
-    *,
-    prompt: str,
-    prompt_path: Path,
-    output_path: Path,
-    metadata_path: Path,
-    payload: dict[str, Any],
-    step: dict[str, Any],
-    step_id: str,
-    feedback_retry_count: int,
-    role: str,
-    review_round: int,
-    sandbox_value: str,
-    approval_mode_value: str,
-    model: str | None,
-    timeout_seconds: int,
-) -> dict[str, Any]:
-    prompt_path.write_text(prompt, encoding="utf-8")
-
-    if config.CODEX_MODE == "stub":
-        final_response = _stub_codex_response(
-            step,
-            step_id,
-            feedback_retry_count,
-            role=role,
-            review_round=review_round,
-        )
-        output_path.write_text(final_response, encoding="utf-8")
-        metadata = {
-            "runner": "codex",
-            "mode": "stub",
-            "role": role,
-            "review_round": review_round,
-            "items_count": 0,
-        }
-        metadata_path.write_text(
-            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return {"final_response": final_response, "metadata": metadata}
-
-    try:
-        from openai_codex import ApprovalMode, Codex, Sandbox
-    except ImportError as exc:
-        raise RuntimeError("openai-codex is not installed") from exc
-
-    sandbox = _sandbox(Sandbox, sandbox_value)
-    approval_mode = _approval_mode(ApprovalMode, approval_mode_value)
-    try:
-        with Codex() as codex:
-            thread = codex.thread_start(
-                approval_mode=approval_mode,
-                cwd=payload["workspace_path"],
-                model=model,
-                sandbox=sandbox,
-            )
-            turn = thread.turn(
-                prompt,
-                approval_mode=approval_mode,
-                cwd=payload["workspace_path"],
-                model=model,
-                sandbox=sandbox,
-            )
-            result = _run_turn_with_timeout(turn, timeout_seconds)
-    except TimeoutError:
-        raise
-
-    final_response = getattr(result, "final_response", None) or ""
-    output_path.write_text(final_response, encoding="utf-8")
-    metadata = {
-        "runner": "codex",
-        "mode": "sdk",
-        "role": role,
-        "review_round": review_round,
-        "thread_id": getattr(thread, "id", None),
-        "turn_id": getattr(result, "id", None),
-        "duration_ms": getattr(result, "duration_ms", None),
-        "items_count": len(getattr(result, "items", []) or []),
-        "usage": _json_safe(getattr(result, "usage", None)),
-    }
-    metadata_path.write_text(
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return {"final_response": final_response, "metadata": metadata}
-
-
 def _finish_reviewed_codex_success(
     *,
     store: SQLiteStore,
@@ -818,6 +788,8 @@ def _reviewed_step_output(
 ) -> dict[str, Any]:
     return {
         "runner": "codex",
+        "kind": "codex",
+        "status": final_contract["status"],
         "mode": _codex_mode_name(),
         "summary": final_contract["summary"],
         "contract": final_contract,
@@ -829,245 +801,73 @@ def _reviewed_step_output(
     }
 
 
-def _repair_context(
+def _script_step_output(
     *,
-    review_round: int,
-    previous_review_round: int,
-    previous_coder_contract: dict[str, Any],
-    reviewer_feedback: dict[str, Any],
+    step: dict[str, Any],
+    status: str,
+    artifact_dir: Path,
+    command: list[str],
+    returncode: int | None,
+    stdout_path: Path,
+    stderr_path: Path,
+    timeout_seconds: int,
+    error: str | None,
 ) -> dict[str, Any]:
-    return {
-        "review_round": review_round,
-        "previous_review_round": previous_review_round,
-        "previous_coder_contract": previous_coder_contract,
-        "reviewer_feedback": reviewer_feedback,
+    script_result, script_result_error = load_optional_json_object(
+        artifact_dir / SCRIPT_RESULT_FILENAME
+    )
+    manifest = build_artifact_manifest(
+        artifact_dir,
+        exclude={ARTIFACT_MANIFEST_FILENAME, STEP_RESULT_FILENAME},
+    )
+    manifest_path = artifact_dir / ARTIFACT_MANIFEST_FILENAME
+    write_artifact_json(manifest_path, manifest)
+
+    output: dict[str, Any] = {
+        "runner": step.get("runner", "script"),
+        "kind": step.get("kind", "deterministic"),
+        "status": status,
+        "summary": _script_step_summary(
+            step=step,
+            status=status,
+            returncode=returncode,
+            script_result=script_result,
+            error=error,
+        ),
+        "command": command,
+        "returncode": returncode,
+        "timeout_seconds": timeout_seconds,
+        "stdout": str(stdout_path),
+        "stderr": str(stderr_path),
+        "artifact_uri": str(artifact_dir),
+        "artifact_manifest": str(manifest_path),
+        "artifacts": manifest["files"],
+        "step_result": str(artifact_dir / STEP_RESULT_FILENAME),
     }
+    if script_result is not None:
+        output["script_result"] = script_result
+    if script_result_error:
+        output["script_result_error"] = script_result_error
+    if error:
+        output["error"] = error
+
+    write_artifact_json(artifact_dir / STEP_RESULT_FILENAME, output)
+    return output
 
 
-def _reviewer_repair_context_section(repair_context: dict[str, Any] | None) -> str:
-    if repair_context is None:
-        return """## Repair Context
-
-No previous reviewer feedback exists for this coder round."""
-
-    return f"""## Repair Context
-
-### Previous Coder Contract
-
-```json
-{_stable_json(repair_context["previous_coder_contract"])}
-```
-
-### Reviewer Feedback Being Addressed
-
-```json
-{_stable_json(repair_context["reviewer_feedback"])}
-```"""
-
-
-def _review_history_for_prompt(review_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
-            "review_round": entry["review_round"],
-            "verdict": entry.get("verdict"),
-            "coder_summary": entry.get("coder_summary"),
-            "reviewer_summary": entry.get("reviewer_summary"),
-            "findings": entry.get("findings") or [],
-            "required_fixes": entry.get("required_fixes") or [],
-            "coder_contract": entry["coder_contract"],
-            "reviewer_contract": entry["reviewer_contract"],
-        }
-        for entry in review_history
-    ]
-
-
-def _build_reviewer_prompt(
+def _script_step_summary(
     *,
-    original_prompt: str,
-    review_round: int,
-    coder_prompt_path: Path,
-    repair_context: dict[str, Any] | None,
-    coder_response: str,
-    coder_contract: dict[str, Any],
-    workspace_path: str,
-    review_history: list[dict[str, Any]],
+    step: dict[str, Any],
+    status: str,
+    returncode: int | None,
+    script_result: dict[str, Any] | None,
+    error: str | None,
 ) -> str:
-    round_context = {
-        "review_round": review_round,
-        "round_type": "repair" if repair_context else "initial",
-        "coder_prompt_artifact": str(coder_prompt_path),
-    }
-    repair_section = _reviewer_repair_context_section(repair_context)
-    return f"""# Codex Review Step
-
-You are the read-only reviewer for a Codex coding step. Review the coder result,
-current workspace diff, and prior review history. Do not edit files.
-
-## Original Task Prompt
-
-{original_prompt}
-
-## Current Coder Round
-
-```json
-{_stable_json(round_context)}
-```
-
-{repair_section}
-
-## Coder Final Response
-
-{coder_response}
-
-## Coder Contract
-
-```json
-{_stable_json(coder_contract)}
-```
-
-## Current Workspace Diff
-
-Generated from the workspace root with `git diff --no-ext-diff --no-color -- .`.
-If the workspace is not a Git repository, this section is empty.
-
-```diff
-{_workspace_diff(Path(workspace_path))}
-```
-
-## Prior Review History
-
-```json
-{_stable_json(_review_history_for_prompt(review_history))}
-```
-
-## Review Contract
-
-Respond with exactly one JSON object and no surrounding Markdown:
-
-```json
-{{
-  "status": "SUCCEEDED",
-  "verdict": "APPROVED",
-  "summary": "Concise review summary.",
-  "findings": [],
-  "required_fixes": [],
-  "error": null
-}}
-```
-
-Use `"verdict": "CHANGES_REQUESTED"` when the coder must repair the result.
-Use `"verdict": "BLOCKED"` when review cannot be completed safely.
-"""
-
-
-def _build_repair_prompt(
-    *,
-    original_prompt: str,
-    review_history: list[dict[str, Any]],
-    repair_context: dict[str, Any],
-) -> str:
-    round_context = {
-        "review_round": repair_context["review_round"],
-        "round_type": "repair",
-        "previous_review_round": repair_context["previous_review_round"],
-    }
-    return f"""# Codex Repair Round
-
-You are the coder for a reviewed Codex step. Continue the original task by
-addressing the reviewer feedback. Keep the patch scoped and do not redo
-unrelated work.
-
-## Original Task Prompt
-
-{original_prompt}
-
-## Current Coder Round
-
-```json
-{_stable_json(round_context)}
-```
-
-## Repair Context
-
-### Previous Coder Contract
-
-```json
-{_stable_json(repair_context["previous_coder_contract"])}
-```
-
-### Reviewer Feedback Being Addressed
-
-```json
-{_stable_json(repair_context["reviewer_feedback"])}
-```
-
-## Prior Review History
-
-```json
-{_stable_json(_review_history_for_prompt(review_history))}
-```
-
-## Output Instruction
-
-Return the same coder output contract required by the original task.
-"""
-
-
-def _evaluate_codex_review_contract(final_response: str) -> dict[str, Any]:
-    try:
-        payload = _extract_json_object(final_response)
-    except ValueError as exc:
-        return {
-            "payload": {},
-            "status": None,
-            "verdict": None,
-            "error": f"Codex review contract violation: {exc}",
-        }
-
-    status_value = payload.get("status")
-    if not isinstance(status_value, str) or not status_value.strip():
-        return {
-            "payload": payload,
-            "status": None,
-            "verdict": None,
-            "error": "Codex review contract violation: missing string field `status`",
-        }
-    status = status_value.strip().upper().replace("-", "_")
-    if status not in {"SUCCEEDED", "SUCCESS", "OK"}:
-        return {
-            "payload": payload,
-            "status": status,
-            "verdict": None,
-            "error": str(payload.get("error") or payload.get("summary") or status_value),
-        }
-
-    verdict_value = payload.get("verdict")
-    if not isinstance(verdict_value, str) or not verdict_value.strip():
-        return {
-            "payload": payload,
-            "status": status,
-            "verdict": None,
-            "error": "Codex review contract violation: missing string field `verdict`",
-        }
-    verdict = verdict_value.strip().upper().replace("-", "_")
-    verdict_aliases = {
-        "PASS": "APPROVED",
-        "PASSED": "APPROVED",
-        "ACCEPTED": "APPROVED",
-        "APPROVE": "APPROVED",
-        "REJECTED": "CHANGES_REQUESTED",
-        "NEEDS_CHANGES": "CHANGES_REQUESTED",
-        "NEEDS_FEEDBACK": "CHANGES_REQUESTED",
-    }
-    verdict = verdict_aliases.get(verdict, verdict)
-    if verdict not in {"APPROVED", "CHANGES_REQUESTED", "BLOCKED"}:
-        return {
-            "payload": payload,
-            "status": status,
-            "verdict": verdict,
-            "error": f"Codex review contract violation: unsupported verdict `{verdict_value}`",
-        }
-    return {"payload": payload, "status": status, "verdict": verdict, "error": None}
+    if script_result is not None and isinstance(script_result.get("summary"), str):
+        return str(script_result["summary"])
+    if status == StepStatus.SUCCEEDED.value:
+        return f"Script step `{step['id']}` succeeded with exit code {returncode}."
+    return error or f"Script step `{step['id']}` failed."
 
 
 def _finish_failed(
@@ -1079,6 +879,11 @@ def _finish_failed(
     output: dict[str, Any],
     error: str,
 ) -> dict[str, Any]:
+    output.setdefault("status", StepStatus.FAILED.value)
+    output.setdefault("summary", error)
+    output.setdefault("artifact_uri", str(artifact_dir))
+    output.setdefault("step_result", str(artifact_dir / STEP_RESULT_FILENAME))
+    _write_json(artifact_dir / STEP_RESULT_FILENAME, output)
     store.finish_step(
         workflow_id=workflow_id,
         step_id=step_id,
@@ -1123,296 +928,17 @@ def _replace_placeholders(value: str, payload: dict[str, Any], artifact_dir: Pat
     )
 
 
-def _sandbox(sandbox_type: Any, value: str) -> Any:
-    normalized = value.replace("-", "_")
-    if normalized in {"read_only", "workspace_write", "full_access"}:
-        return getattr(sandbox_type, normalized)
-    if normalized in {"danger_full_access", "danger"}:
-        return getattr(sandbox_type, "full_access")
-    raise ValueError(f"Unsupported Codex sandbox: {value}")
-
-
-def _approval_mode(approval_type: Any, value: str) -> Any:
-    normalized = value.replace("-", "_")
-    if normalized in {"never", "deny_all", "deny"}:
-        return getattr(approval_type, "deny_all")
-    if normalized in {"auto_review", "on_request", "untrusted"}:
-        return getattr(approval_type, "auto_review")
-    raise ValueError(f"Unsupported Codex approval mode: {value}")
-
-
-def _run_turn_with_timeout(turn: Any, timeout_seconds: int) -> Any:
-    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
-
-    def worker() -> None:
-        try:
-            result_queue.put(("result", turn.run()))
-        except BaseException as exc:  # noqa: BLE001
-            result_queue.put(("error", exc))
-
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout_seconds)
-    if thread.is_alive():
-        try:
-            turn.interrupt()
-        except Exception:
-            pass
-        thread.join(timeout=5)
-        raise TimeoutError
-
-    kind, payload = result_queue.get_nowait()
-    if kind == "error":
-        raise payload
-    return payload
-
-
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if hasattr(value, "model_dump"):
-        return _json_safe(value.model_dump(mode="json"))
-    if hasattr(value, "value"):
-        return _json_safe(value.value)
-    return str(value)
-
-
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def _stable_json(payload: Any) -> str:
-    return json.dumps(payload, indent=2, sort_keys=True)
 
 
 def _feedback_retry_count(payload: dict[str, Any]) -> int:
     return int(payload.get("feedback_retry_count", 0) or 0)
 
 
-def _codex_mode_name() -> str:
-    return "stub" if config.CODEX_MODE == "stub" else "sdk"
-
-
-def _as_list(value: Any) -> list[Any]:
+def _timeout_stream(value: bytes | str | None) -> str:
     if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    return [value]
-
-
-def _workspace_diff(workspace_path: Path) -> str:
-    if not (workspace_path / ".git").exists():
         return ""
-    try:
-        completed = subprocess.run(
-            ["git", "diff", "--no-ext-diff", "--no-color", "--", "."],
-            cwd=workspace_path,
-            text=True,
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    if completed.returncode != 0:
-        return completed.stderr[:4000]
-    return completed.stdout[:20000]
-
-
-def _codex_review_config(step: dict[str, Any]) -> dict[str, Any]:
-    review = step.get("review", False)
-    if review in (None, False):
-        return {"enabled": False}
-    if review is True:
-        review = {}
-    if not isinstance(review, dict):
-        raise ValueError("Codex review config must be a boolean or mapping")
-
-    enabled = bool(review.get("enabled", True))
-    if not enabled:
-        return {"enabled": False}
-
-    max_review_rounds = int(review.get("max_review_rounds", 2))
-    if max_review_rounds < 1:
-        raise ValueError("Codex review max_review_rounds must be positive")
-
-    return {
-        "enabled": True,
-        "max_review_rounds": max_review_rounds,
-        "reviewer_sandbox": review.get("reviewer_sandbox", "read-only"),
-        "reviewer_approval_mode": review.get("reviewer_approval_mode", "deny_all"),
-        "reviewer_timeout_seconds": int(review.get("reviewer_timeout_seconds", 900)),
-        "reviewer_model": review.get("reviewer_model"),
-        "stub_verdicts": review.get("stub_verdicts"),
-    }
-
-
-def _stub_codex_response(
-    step: dict[str, Any],
-    step_id: str,
-    feedback_retry_count: int,
-    *,
-    role: str = "coder",
-    review_round: int = 1,
-) -> str:
-    if role == "reviewer":
-        review_config = _codex_review_config(step)
-        verdicts = review_config.get("stub_verdicts") or ["APPROVED"]
-        verdict = str(verdicts[min(review_round - 1, len(verdicts) - 1)])
-        verdict = verdict.upper().replace("-", "_")
-        findings = []
-        required_fixes = []
-        if verdict == "CHANGES_REQUESTED":
-            findings = [
-                {
-                    "severity": "medium",
-                    "issue": "Stub reviewer requested one repair round.",
-                    "required_fix": "Run another coder repair round.",
-                }
-            ]
-            required_fixes = ["Run another coder repair round."]
-        return json.dumps(
-            {
-                "status": "SUCCEEDED",
-                "verdict": verdict,
-                "summary": f"CODEX_STUB_REVIEW_{verdict} for {step_id}",
-                "findings": findings,
-                "required_fixes": required_fixes,
-                "error": None,
-                "review_round": review_round,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-
-    return json.dumps(
-        {
-            "status": "SUCCEEDED",
-            "summary": f"CODEX_STUB_DONE for {step_id}",
-            "changed_files": [],
-            "checks": ["stub mode returned a contract-compliant response"],
-            "error": None,
-            "step_run_number": feedback_retry_count + 1,
-            "review_round": review_round,
-        },
-        indent=2,
-        sort_keys=True,
-    )
-
-
-def _codex_output_contract(step: dict[str, Any]) -> dict[str, Any]:
-    contract = step.get("output_contract", {})
-    if contract is None or contract is True or contract == {}:
-        return {"type": "status_json"}
-    if contract is False:
-        raise ValueError("Codex output contracts are required and cannot be disabled")
-    if isinstance(contract, str):
-        return {"type": contract}
-    if isinstance(contract, dict):
-        return {"type": "status_json", **contract}
-    raise ValueError("output_contract must be a boolean, string, or mapping")
-
-
-def _evaluate_codex_output_contract(
-    step: dict[str, Any],
-    final_response: str,
-) -> dict[str, Any]:
-    contract = _codex_output_contract(step)
-
-    contract_type = str(contract.get("type", "status_json"))
-    if contract_type not in {"status_json", "json_status"}:
-        raise ValueError(f"Unsupported Codex output contract type: {contract_type}")
-
-    try:
-        payload = _extract_json_object(final_response)
-    except ValueError as exc:
-        return {
-            "payload": {},
-            "status": None,
-            "error": f"Codex output contract violation: {exc}",
-        }
-
-    status_field = str(contract.get("status_field", "status"))
-    status_value = payload.get(status_field)
-    if not isinstance(status_value, str) or not status_value.strip():
-        return {
-            "payload": payload,
-            "status": None,
-            "error": f"Codex output contract violation: missing string field `{status_field}`",
-        }
-
-    status = status_value.strip().upper().replace("-", "_")
-    success_statuses = {
-        str(value).upper().replace("-", "_")
-        for value in contract.get("success_statuses", ["SUCCEEDED", "SUCCESS", "OK"])
-    }
-    failure_statuses = {
-        str(value).upper().replace("-", "_")
-        for value in contract.get(
-            "failure_statuses",
-            ["FAILED", "FAILURE", "ERROR", "NEEDS_FEEDBACK"],
-        )
-    }
-
-    required_fields = [str(field) for field in contract.get("required_fields", [])]
-    missing_fields = [field for field in required_fields if field not in payload]
-    if missing_fields:
-        return {
-            "payload": payload,
-            "status": status,
-            "error": (
-                "Codex output contract violation: missing required field(s) "
-                + ", ".join(f"`{field}`" for field in missing_fields)
-            ),
-        }
-
-    if status in success_statuses:
-        return {"payload": payload, "status": status, "error": None}
-
-    if status in failure_statuses:
-        error = payload.get("error") or payload.get("summary") or f"Codex reported {status_value}"
-        return {"payload": payload, "status": status, "error": str(error)}
-
-    return {
-        "payload": payload,
-        "status": status,
-        "error": f"Codex output contract violation: unsupported status `{status_value}`",
-    }
-
-
-def _extract_json_object(value: str) -> dict[str, Any]:
-    stripped = value.strip()
-    if not stripped:
-        raise ValueError("empty response; expected a JSON object")
-
-    try:
-        parsed = json.loads(stripped)
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-
-    for match in re.finditer(r"```(?:json)?\s*(.*?)```", value, re.IGNORECASE | re.DOTALL):
-        candidate = match.group(1).strip()
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-
-    decoder = json.JSONDecoder()
-    for match in re.finditer(r"\{", value):
-        try:
-            parsed, _ = decoder.raw_decode(value[match.start():])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-
-    raise ValueError("expected a JSON object with a status field")
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
