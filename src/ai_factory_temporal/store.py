@@ -100,6 +100,20 @@ class SQLiteStore:
                         "UPDATE workflow_steps "
                         "SET feedback_retry_count = retry_count"
                     )
+            conn.execute(
+                """
+                UPDATE workflow_steps
+                SET runner = 'codex'
+                WHERE kind = 'codex' AND (runner IS NULL OR runner = '')
+                """
+            )
+            conn.execute(
+                """
+                UPDATE workflow_steps
+                SET runner = 'script'
+                WHERE kind = 'deterministic' AND (runner IS NULL OR runner = '')
+                """
+            )
 
     def create_workflow(
         self,
@@ -149,7 +163,7 @@ class SQLiteStore:
                         step["id"],
                         step.get("name", step["id"]),
                         step["kind"],
-                        step.get("runner"),
+                        _step_runner(step),
                         StepStatus.PENDING.value,
                         json.dumps(step, sort_keys=True),
                     ),
@@ -218,6 +232,9 @@ class SQLiteStore:
         if feedback_retry_count is not None:
             assignments.append("feedback_retry_count = ?")
             params.append(feedback_retry_count)
+        if output.get("runner"):
+            assignments.append("runner = ?")
+            params.append(str(output["runner"]))
         params.extend([workflow_id, step_id])
 
         with self.connect() as conn:
@@ -310,3 +327,13 @@ class SQLiteStore:
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
         }
+
+
+def _step_runner(step: dict[str, Any]) -> str | None:
+    if step.get("runner"):
+        return str(step["runner"])
+    if step.get("kind") == "codex":
+        return "codex"
+    if step.get("kind") == "deterministic":
+        return "script"
+    return None

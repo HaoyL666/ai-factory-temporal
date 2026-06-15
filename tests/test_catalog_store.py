@@ -64,20 +64,55 @@ class CatalogStoreTest(unittest.TestCase):
             response = store.workflow_response(workflow_id)
             self.assertEqual(response["workflow"]["status"], WorkflowStatus.PENDING.value)
             self.assertEqual(len(response["steps"]), 4)
+            self.assertEqual(
+                [step["runner"] for step in response["steps"]],
+                ["codex", "script", None, "codex"],
+            )
 
             store.mark_step_running(workflow_id, "plan_upgrade", feedback_retry_count=0)
             store.finish_step(
                 workflow_id=workflow_id,
                 step_id="plan_upgrade",
                 status=StepStatus.SUCCEEDED.value,
-                output={"summary": "ok"},
+                output={"runner": "codex", "summary": "ok"},
                 artifact_uri="local://artifact",
             )
 
             steps = store.list_steps(workflow_id)
             self.assertEqual(steps[0]["status"], StepStatus.SUCCEEDED.value)
+            self.assertEqual(steps[0]["runner"], "codex")
             self.assertEqual(steps[0]["output"]["summary"], "ok")
             self.assertEqual(steps[0]["feedback_retry_count"], 0)
+
+    def test_store_backfills_missing_runner_for_existing_steps(self) -> None:
+        catalog = ProjectCatalog(config.PROJECTS_DIR)
+        workflow = catalog.load_workflow("generic-project", "upgrade")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "test.db"
+            store = SQLiteStore(db_path)
+            workflow_id = new_workflow_id()
+            store.create_workflow(
+                workflow_id=workflow_id,
+                project_id="generic-project",
+                task_type="upgrade",
+                inputs={"target_version": "1.2.3"},
+                workspace_path=str(Path(tmp)),
+                steps=workflow["steps"],
+            )
+
+            with store.connect() as conn:
+                conn.execute(
+                    "UPDATE workflow_steps SET runner = NULL WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+
+            reopened = SQLiteStore(db_path)
+            steps = reopened.list_steps(workflow_id)
+            self.assertEqual(
+                [step["runner"] for step in steps],
+                ["codex", "script", None, "codex"],
+            )
 
     def test_rejects_script_step_without_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
