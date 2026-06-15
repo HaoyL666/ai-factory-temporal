@@ -36,6 +36,7 @@ from ai_factory_temporal.review_prompts import (
     repair_context as _repair_context,
 )
 from ai_factory_temporal.store import SQLiteStore
+from ai_factory_temporal.usage import estimate_usage_cost, normalize_token_usage
 
 
 @activity.defn(name="set_workflow_status")
@@ -393,6 +394,16 @@ def _run_single_codex_step(
             f"Codex timed out after {int(step.get('timeout_seconds', 1800))} seconds",
         )
 
+    usage_record = _record_codex_usage(
+        store=store,
+        payload=payload,
+        step=step,
+        metadata=turn_output["metadata"],
+        role="coder",
+        review_round=1,
+        feedback_retry_count=feedback_retry_count,
+        artifact_dir=artifact_dir,
+    )
     final_response = turn_output["final_response"]
     output = {
         "runner": "codex",
@@ -405,6 +416,9 @@ def _run_single_codex_step(
         "metadata": str(metadata_path),
         "thread_id": turn_output["metadata"].get("thread_id"),
         "turn_id": turn_output["metadata"].get("turn_id"),
+        "usage": usage_record["usage"],
+        "estimated_cost": usage_record["estimated_cost"],
+        "cost_currency": usage_record["cost_currency"],
     }
     contract_result = _evaluate_codex_output_contract(step, final_response)
     output["contract"] = contract_result["payload"]
@@ -503,6 +517,16 @@ def _run_reviewed_codex_step(
                 ),
             )
 
+        coder_usage = _record_codex_usage(
+            store=store,
+            payload=payload,
+            step=step,
+            metadata=coder_turn["metadata"],
+            role="coder",
+            review_round=review_round,
+            feedback_retry_count=feedback_retry_count,
+            artifact_dir=artifact_dir,
+        )
         coder_contract = _evaluate_codex_output_contract(step, coder_turn["final_response"])
         _write_json(coder_contract_path, coder_contract)
         if coder_contract.get("error"):
@@ -563,6 +587,16 @@ def _run_reviewed_codex_step(
                 coder_contract=coder_contract,
             )
 
+        reviewer_usage = _record_codex_usage(
+            store=store,
+            payload=payload,
+            step=step,
+            metadata=reviewer_turn["metadata"],
+            role="reviewer",
+            review_round=review_round,
+            feedback_retry_count=feedback_retry_count,
+            artifact_dir=artifact_dir,
+        )
         review_contract = _evaluate_codex_review_contract(reviewer_turn["final_response"])
         _write_json(reviewer_contract_path, review_contract)
         history_entry = {
@@ -578,6 +612,10 @@ def _run_reviewed_codex_step(
             "coder_response": str(coder_output_path),
             "reviewer_prompt": str(reviewer_prompt_path),
             "reviewer_response": str(reviewer_output_path),
+            "coder_usage": coder_usage["usage"],
+            "coder_estimated_cost": coder_usage["estimated_cost"],
+            "reviewer_usage": reviewer_usage["usage"],
+            "reviewer_estimated_cost": reviewer_usage["estimated_cost"],
         }
         review_history.append(history_entry)
 
@@ -799,6 +837,45 @@ def _reviewed_step_output(
         "artifact_uri": str(artifact_dir),
         "step_result": str(artifact_dir / "step-result.json"),
     }
+
+
+def _record_codex_usage(
+    *,
+    store: SQLiteStore,
+    payload: dict[str, Any],
+    step: dict[str, Any],
+    metadata: dict[str, Any],
+    role: str,
+    review_round: int,
+    feedback_retry_count: int,
+    artifact_dir: Path,
+) -> dict[str, Any]:
+    raw_usage = metadata.get("usage") if isinstance(metadata, dict) else None
+    usage = normalize_token_usage(raw_usage)
+    estimated_cost = estimate_usage_cost(
+        usage,
+        input_price_per_1m=config.INPUT_TOKEN_PRICE_PER_1M,
+        output_price_per_1m=config.OUTPUT_TOKEN_PRICE_PER_1M,
+        cache_read_price_per_1m=config.CACHE_READ_TOKEN_PRICE_PER_1M,
+        cache_creation_price_per_1m=config.CACHE_CREATION_TOKEN_PRICE_PER_1M,
+    )
+    return store.record_codex_usage(
+        workflow_id=payload["workflow_id"],
+        step_id=step["id"],
+        step_run_number=feedback_retry_count + 1,
+        role=role,
+        review_round=review_round,
+        mode=str(metadata.get("mode") or _codex_mode_name()),
+        model=metadata.get("model") or step.get("model") or config.CODEX_MODEL,
+        thread_id=metadata.get("thread_id"),
+        turn_id=metadata.get("turn_id"),
+        usage=usage,
+        raw_usage=raw_usage,
+        metadata=metadata,
+        estimated_cost=estimated_cost,
+        cost_currency=config.COST_CURRENCY,
+        artifact_uri=str(artifact_dir),
+    )
 
 
 def _script_step_output(

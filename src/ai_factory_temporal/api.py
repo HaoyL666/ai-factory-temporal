@@ -9,7 +9,7 @@ from temporalio.client import Client
 
 from ai_factory_temporal import config
 from ai_factory_temporal.catalog import CatalogError, ProjectCatalog
-from ai_factory_temporal.store import SQLiteStore, new_workflow_id
+from ai_factory_temporal.store import SQLiteStore, new_workflow_id, usage_summary
 from ai_factory_temporal.workflows import AIFactoryWorkflow
 
 
@@ -99,6 +99,19 @@ def create_app() -> FastAPI:
             return store.workflow_response(workflow_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/workflows/{workflow_id}/usage")
+    async def get_workflow_usage(workflow_id: str):
+        try:
+            store.get_workflow(workflow_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        records = store.list_usage_records(workflow_id)
+        return {
+            "workflow_id": workflow_id,
+            "summary": usage_summary(records),
+            "records": records,
+        }
 
     @app.get("/workflows/{workflow_id}/runtime")
     async def get_runtime_state(workflow_id: str):

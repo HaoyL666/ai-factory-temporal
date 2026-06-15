@@ -114,6 +114,55 @@ class CatalogStoreTest(unittest.TestCase):
                 ["codex", "script", None, "codex"],
             )
 
+    def test_store_records_codex_usage_and_workflow_totals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteStore(Path(tmp) / "test.db")
+            workflow_id = new_workflow_id()
+            store.create_workflow(
+                workflow_id=workflow_id,
+                project_id="generic-project",
+                task_type="codex",
+                inputs={},
+                workspace_path=str(Path(tmp)),
+                steps=[{"id": "codex_step", "name": "Codex Step", "kind": "codex"}],
+            )
+
+            record = store.record_codex_usage(
+                workflow_id=workflow_id,
+                step_id="codex_step",
+                step_run_number=1,
+                role="coder",
+                review_round=1,
+                mode="sdk",
+                model="gpt-test",
+                thread_id="thread-1",
+                turn_id="turn-1",
+                usage={
+                    "input_tokens": 100,
+                    "output_tokens": 25,
+                    "cache_read_input_tokens": 10,
+                    "cache_creation_input_tokens": 0,
+                    "billable_input_tokens": 90,
+                    "total_tokens": 125,
+                },
+                raw_usage={"input_tokens": 100},
+                metadata={"mode": "sdk", "turn_id": "turn-1"},
+                estimated_cost=0.0014,
+                cost_currency="USD",
+                artifact_uri="/tmp/artifacts/codex_step/step-run-1",
+            )
+
+            self.assertEqual(record["role"], "coder")
+            self.assertEqual(record["usage"]["input_tokens"], 100)
+            self.assertEqual(record["estimated_cost"], 0.0014)
+
+            response = store.workflow_response(workflow_id)
+            self.assertEqual(response["usage"]["summary"]["turn_count"], 1)
+            self.assertEqual(response["usage"]["summary"]["priced_turn_count"], 1)
+            self.assertEqual(response["usage"]["summary"]["usage"]["total_tokens"], 125)
+            self.assertEqual(response["usage"]["summary"]["estimated_cost"], 0.0014)
+            self.assertEqual(response["usage"]["records"][0]["turn_id"], "turn-1")
+
     def test_rejects_script_step_without_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             projects_dir = Path(tmp) / "projects"

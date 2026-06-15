@@ -4,6 +4,13 @@ import os
 from pathlib import Path
 
 
+def _optional_float(name: str) -> float | None:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return None
+    return float(value)
+
+
 PROJECT_ROOT = Path(os.environ.get("AI_FACTORY_ROOT", Path(__file__).resolve().parents[2]))
 PROJECTS_DIR = Path(os.environ.get("AI_FACTORY_PROJECTS_DIR", PROJECT_ROOT / "projects"))
 DB_PATH = Path(os.environ.get("AI_FACTORY_DB", PROJECT_ROOT / "var" / "ai_factory.db"))
@@ -17,3 +24,11 @@ CODEX_MODEL = os.environ.get("AI_FACTORY_CODEX_MODEL")
 CODEX_SANDBOX = os.environ.get("AI_FACTORY_CODEX_SANDBOX", "workspace-write")
 CODEX_APPROVAL_MODE = os.environ.get("AI_FACTORY_CODEX_APPROVAL_MODE", "auto_review")
 CODEX_MODE = os.environ.get("AI_FACTORY_CODEX_MODE", "real")
+
+COST_CURRENCY = os.environ.get("AI_FACTORY_COST_CURRENCY", "USD")
+INPUT_TOKEN_PRICE_PER_1M = _optional_float("AI_FACTORY_INPUT_TOKEN_PRICE_PER_1M")
+OUTPUT_TOKEN_PRICE_PER_1M = _optional_float("AI_FACTORY_OUTPUT_TOKEN_PRICE_PER_1M")
+CACHE_READ_TOKEN_PRICE_PER_1M = _optional_float("AI_FACTORY_CACHE_READ_TOKEN_PRICE_PER_1M")
+CACHE_CREATION_TOKEN_PRICE_PER_1M = _optional_float(
+    "AI_FACTORY_CACHE_CREATION_TOKEN_PRICE_PER_1M"
+)

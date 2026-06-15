@@ -177,6 +177,12 @@ class CodexContractTest(unittest.TestCase):
                     result["output"]["step_result"],
                     str(artifact_uri / "step-result.json"),
                 )
+                usage_records = store.list_usage_records(workflow_id)
+                self.assertEqual(len(usage_records), 1)
+                self.assertEqual(usage_records[0]["step_id"], "codex_edit_file")
+                self.assertEqual(usage_records[0]["role"], "coder")
+                self.assertEqual(usage_records[0]["mode"], "stub")
+                self.assertEqual(usage_records[0]["usage"]["total_tokens"], 0)
         finally:
             activities.config.CODEX_MODE = old_mode
 
@@ -199,9 +205,12 @@ class CodexContractTest(unittest.TestCase):
         self.assertTrue((artifact_uri / "review-round-1" / "reviewer-contract.json").exists())
         self.assertTrue((artifact_uri / "step-result.json").exists())
         self.assertEqual(store.list_steps(workflow_id)[0]["status"], StepStatus.SUCCEEDED.value)
+        usage_records = store.list_usage_records(workflow_id)
+        self.assertEqual([record["role"] for record in usage_records], ["coder", "reviewer"])
+        self.assertEqual([record["review_round"] for record in usage_records], [1, 1])
 
     def test_stub_codex_step_review_repairs_then_approves(self) -> None:
-        result, _store, _workflow_id, artifact_uri = self._run_stub_reviewed_codex_step(
+        result, store, workflow_id, artifact_uri = self._run_stub_reviewed_codex_step(
             {
                 "enabled": True,
                 "max_review_rounds": 2,
@@ -221,6 +230,11 @@ class CodexContractTest(unittest.TestCase):
         self.assertIn('"round_type": "repair"', reviewer_prompt)
         self.assertIn("## Reviewer Feedback Being Addressed", reviewer_prompt)
         self.assertNotIn("## Coder Prompt For This Review Round", reviewer_prompt)
+        usage_records = store.list_usage_records(workflow_id)
+        self.assertEqual(
+            [(record["role"], record["review_round"]) for record in usage_records],
+            [("coder", 1), ("reviewer", 1), ("coder", 2), ("reviewer", 2)],
+        )
 
     def test_stub_codex_step_review_rejection_fails_after_max_rounds(self) -> None:
         result, store, workflow_id, artifact_uri = self._run_stub_reviewed_codex_step(

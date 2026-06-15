@@ -100,6 +100,17 @@ export AI_FACTORY_CODEX_SANDBOX=workspace-write
 export AI_FACTORY_CODEX_APPROVAL_MODE=auto_review
 ```
 
+Optional cost settings use prices per 1M tokens. If these are unset, the
+harness still records tokens and leaves estimated cost as `null`.
+
+```bash
+export AI_FACTORY_COST_CURRENCY=USD
+export AI_FACTORY_INPUT_TOKEN_PRICE_PER_1M=
+export AI_FACTORY_OUTPUT_TOKEN_PRICE_PER_1M=
+export AI_FACTORY_CACHE_READ_TOKEN_PRICE_PER_1M=
+export AI_FACTORY_CACHE_CREATION_TOKEN_PRICE_PER_1M=
+```
+
 ## Run API
 
 In another terminal:
@@ -167,6 +178,12 @@ Check Temporal runtime state:
 
 ```bash
 curl -s http://127.0.0.1:8000/workflows/wf-example/runtime
+```
+
+Check Codex token and cost tracking:
+
+```bash
+curl -s http://127.0.0.1:8000/workflows/wf-example/usage
 ```
 
 ## Approval
@@ -340,6 +357,22 @@ can just exit `0` or nonzero and write whatever evidence files they have.
 Later Codex steps receive previous step outputs with the artifact directory,
 manifest path, and discovered artifact list, so prompts do not need to hardcode
 every deterministic output file name.
+
+## Token And Cost Tracking
+
+Every Codex turn records one `workflow_usage` row with the workflow id, step id,
+step run number, role (`coder` or `reviewer`), review round, model, raw SDK usage,
+normalized token counts, and optional estimated cost.
+
+The normalized counts are also returned from:
+
+```text
+GET /workflows/{workflow_id}
+GET /workflows/{workflow_id}/usage
+```
+
+Cost tracking is observational only. The harness does not enforce budgets or
+stop workflows based on cost.
 
 ## Codex Review Loop
 

@@ -42,7 +42,9 @@ def run_codex_turn(
             "mode": "stub",
             "role": role,
             "review_round": review_round,
+            "model": model,
             "items_count": 0,
+            "usage": None,
         }
         _write_metadata(metadata_path, metadata)
         return {"final_response": final_response, "metadata": metadata}
@@ -80,6 +82,7 @@ def run_codex_turn(
         "mode": "sdk",
         "role": role,
         "review_round": review_round,
+        "model": model,
         "thread_id": getattr(thread, "id", None),
         "turn_id": getattr(result, "id", None),
         "duration_ms": getattr(result, "duration_ms", None),

@@ -82,8 +82,41 @@ class SQLiteStore:
                   created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS workflow_usage (
+                  id TEXT PRIMARY KEY,
+                  workflow_id TEXT NOT NULL,
+                  step_id TEXT NOT NULL,
+                  step_run_number INTEGER NOT NULL,
+                  role TEXT NOT NULL,
+                  review_round INTEGER NOT NULL,
+                  mode TEXT NOT NULL,
+                  model TEXT,
+                  thread_id TEXT,
+                  turn_id TEXT,
+                  input_tokens INTEGER NOT NULL DEFAULT 0,
+                  output_tokens INTEGER NOT NULL DEFAULT 0,
+                  cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+                  cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+                  billable_input_tokens INTEGER NOT NULL DEFAULT 0,
+                  total_tokens INTEGER NOT NULL DEFAULT 0,
+                  estimated_cost REAL,
+                  cost_currency TEXT NOT NULL DEFAULT 'USD',
+                  raw_usage_json TEXT NOT NULL,
+                  metadata_json TEXT NOT NULL,
+                  artifact_uri TEXT,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(workflow_id) REFERENCES workflows(id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_workflow_steps_order
                   ON workflow_steps(workflow_id, step_order);
+                CREATE INDEX IF NOT EXISTS idx_workflow_usage_workflow
+                  ON workflow_usage(workflow_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_workflow_usage_step
+                  ON workflow_usage(workflow_id, step_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_usage_turn_id
+                  ON workflow_usage(turn_id)
+                  WHERE turn_id IS NOT NULL AND turn_id != '';
                 """
             )
             columns = {
@@ -273,6 +306,85 @@ class SQLiteStore:
                 (uuid.uuid4().hex, workflow_id, step_id, int(approved), comment, utc_now()),
             )
 
+    def record_codex_usage(
+        self,
+        *,
+        workflow_id: str,
+        step_id: str,
+        step_run_number: int,
+        role: str,
+        review_round: int,
+        mode: str,
+        model: str | None,
+        thread_id: str | None,
+        turn_id: str | None,
+        usage: dict[str, int],
+        raw_usage: Any,
+        metadata: dict[str, Any],
+        estimated_cost: float | None,
+        cost_currency: str,
+        artifact_uri: str,
+    ) -> dict[str, Any]:
+        record_id = uuid.uuid4().hex
+        created_at = utc_now()
+        raw_usage_json = json.dumps(raw_usage or {}, sort_keys=True)
+        metadata_json = json.dumps(metadata or {}, sort_keys=True)
+
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO workflow_usage (
+                  id, workflow_id, step_id, step_run_number, role, review_round,
+                  mode, model, thread_id, turn_id, input_tokens, output_tokens,
+                  cache_read_input_tokens, cache_creation_input_tokens,
+                  billable_input_tokens, total_tokens, estimated_cost,
+                  cost_currency, raw_usage_json, metadata_json, artifact_uri,
+                  created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record_id,
+                    workflow_id,
+                    step_id,
+                    step_run_number,
+                    role,
+                    review_round,
+                    mode,
+                    model,
+                    thread_id,
+                    turn_id,
+                    int(usage.get("input_tokens", 0)),
+                    int(usage.get("output_tokens", 0)),
+                    int(usage.get("cache_read_input_tokens", 0)),
+                    int(usage.get("cache_creation_input_tokens", 0)),
+                    int(usage.get("billable_input_tokens", 0)),
+                    int(usage.get("total_tokens", 0)),
+                    estimated_cost,
+                    cost_currency,
+                    raw_usage_json,
+                    metadata_json,
+                    artifact_uri,
+                    created_at,
+                ),
+            )
+            if cursor.rowcount:
+                row = conn.execute(
+                    "SELECT * FROM workflow_usage WHERE id = ?",
+                    (record_id,),
+                ).fetchone()
+            elif turn_id:
+                row = conn.execute(
+                    "SELECT * FROM workflow_usage WHERE turn_id = ?",
+                    (turn_id,),
+                ).fetchone()
+            else:
+                row = None
+
+        if row is None:
+            raise RuntimeError("Failed to record Codex usage")
+        return self._usage_from_row(row)
+
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM workflows WHERE id = ?", (workflow_id,)).fetchone()
@@ -302,10 +414,27 @@ class SQLiteStore:
             ).fetchall()
         return [self._step_from_row(row) for row in rows]
 
+    def list_usage_records(self, workflow_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM workflow_usage
+                WHERE workflow_id = ?
+                ORDER BY created_at ASC
+                """,
+                (workflow_id,),
+            ).fetchall()
+        return [self._usage_from_row(row) for row in rows]
+
     def workflow_response(self, workflow_id: str) -> dict[str, Any]:
+        usage_records = self.list_usage_records(workflow_id)
         return {
             "workflow": self.get_workflow(workflow_id),
             "steps": self.list_steps(workflow_id),
+            "usage": {
+                "summary": usage_summary(usage_records),
+                "records": usage_records,
+            },
         }
 
     @staticmethod
@@ -328,6 +457,36 @@ class SQLiteStore:
             "finished_at": row["finished_at"],
         }
 
+    @staticmethod
+    def _usage_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        usage = {
+            "input_tokens": row["input_tokens"],
+            "output_tokens": row["output_tokens"],
+            "cache_read_input_tokens": row["cache_read_input_tokens"],
+            "cache_creation_input_tokens": row["cache_creation_input_tokens"],
+            "billable_input_tokens": row["billable_input_tokens"],
+            "total_tokens": row["total_tokens"],
+        }
+        return {
+            "id": row["id"],
+            "workflow_id": row["workflow_id"],
+            "step_id": row["step_id"],
+            "step_run_number": row["step_run_number"],
+            "role": row["role"],
+            "review_round": row["review_round"],
+            "mode": row["mode"],
+            "model": row["model"],
+            "thread_id": row["thread_id"],
+            "turn_id": row["turn_id"],
+            "usage": usage,
+            "estimated_cost": row["estimated_cost"],
+            "cost_currency": row["cost_currency"],
+            "raw_usage": json.loads(row["raw_usage_json"]),
+            "metadata": json.loads(row["metadata_json"]),
+            "artifact_uri": row["artifact_uri"],
+            "created_at": row["created_at"],
+        }
+
 
 def _step_runner(step: dict[str, Any]) -> str | None:
     if step.get("runner"):
@@ -337,3 +496,32 @@ def _step_runner(step: dict[str, Any]) -> str | None:
     if step.get("kind") == "deterministic":
         return "script"
     return None
+
+
+def usage_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    totals = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "billable_input_tokens": 0,
+        "total_tokens": 0,
+    }
+    estimated_cost = 0.0
+    priced_turns = 0
+    currency = "USD"
+    for record in records:
+        for key in totals:
+            totals[key] += int(record["usage"].get(key, 0))
+        if record.get("estimated_cost") is not None:
+            estimated_cost += float(record["estimated_cost"])
+            priced_turns += 1
+            currency = str(record.get("cost_currency") or currency)
+
+    return {
+        "turn_count": len(records),
+        "priced_turn_count": priced_turns,
+        "usage": totals,
+        "estimated_cost": estimated_cost if priced_turns else None,
+        "cost_currency": currency,
+    }
