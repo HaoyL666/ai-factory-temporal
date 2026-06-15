@@ -1,24 +1,14 @@
-.venv/
+# Python
 .venv*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Local environment and OS files
 .env
 .env.*
 .DS_Store
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
-.ruff_cache/
-*.egg-info/
-build/
-dist/
-.coverage
-htmlcov/
-*.log
-*.sqlite
-*.sqlite3
-*.db
+
+# Runtime state and artifacts
 var/*
-!var/artifacts/
-var/artifacts/*
-!var/artifacts/.gitkeep

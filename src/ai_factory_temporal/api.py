@@ -4,11 +4,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from temporalio.client import Client
 
 from ai_factory_temporal import config
 from ai_factory_temporal.catalog import CatalogError, ProjectCatalog
+from ai_factory_temporal.git_workspace import create_isolated_worktree, remove_isolated_worktree
 from ai_factory_temporal.store import SQLiteStore, new_workflow_id, usage_summary
 from ai_factory_temporal.workflows import AIFactoryWorkflow
 
@@ -17,7 +18,16 @@ class CreateWorkflowRequest(BaseModel):
     project_id: str
     task_type: str
     inputs: dict[str, Any] = Field(default_factory=dict)
-    workspace_path: str
+    workspace_path: str | None = None
+    target_repo_path: str | None = None
+    base_ref: str | None = None
+    worktrees_dir: str | None = None
+
+    @model_validator(mode="after")
+    def validate_workspace_source(self) -> "CreateWorkflowRequest":
+        if bool(self.workspace_path) == bool(self.target_repo_path):
+            raise ValueError("provide exactly one of workspace_path or target_repo_path")
+        return self
 
 
 class ApprovalRequest(BaseModel):
@@ -51,16 +61,25 @@ def create_app() -> FastAPI:
 
         workflow_id = new_workflow_id()
         project_dir = catalog.project_dir(request.project_id)
-        workspace_path = str(Path(request.workspace_path).resolve())
+        workspace = _prepare_workspace(request, workflow_id)
+        workspace_path = workspace["workspace_path"]
         steps = workflow_def["steps"]
-        store.create_workflow(
-            workflow_id=workflow_id,
-            project_id=request.project_id,
-            task_type=request.task_type,
-            inputs=request.inputs,
-            workspace_path=workspace_path,
-            steps=steps,
-        )
+        try:
+            store.create_workflow(
+                workflow_id=workflow_id,
+                project_id=request.project_id,
+                task_type=request.task_type,
+                inputs=request.inputs,
+                workspace_path=workspace_path,
+                steps=steps,
+            )
+        except Exception as exc:
+            if workspace.get("mode") == "managed_worktree":
+                remove_isolated_worktree(workspace)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to persist workflow: {exc}",
+            ) from exc
         spec = {
             "workflow_id": workflow_id,
             "project_id": request.project_id,
@@ -71,6 +90,7 @@ def create_app() -> FastAPI:
             "project_dir": str(project_dir),
             "db_path": str(config.DB_PATH),
             "artifacts_path": str(config.ARTIFACTS_DIR),
+            "workspace": workspace,
             "steps": steps,
         }
         try:
@@ -82,6 +102,8 @@ def create_app() -> FastAPI:
                 task_queue=config.TEMPORAL_TASK_QUEUE,
             )
         except Exception as exc:
+            if workspace.get("mode") == "managed_worktree":
+                remove_isolated_worktree(workspace)
             store.set_workflow_status(workflow_id, "FAILED")
             raise HTTPException(
                 status_code=503,
@@ -91,6 +113,7 @@ def create_app() -> FastAPI:
             "workflow_id": workflow_id,
             "status": "PENDING",
             "temporal_workflow_id": workflow_id,
+            "workspace": workspace,
         }
 
     @app.get("/workflows/{workflow_id}")
@@ -155,6 +178,32 @@ def create_app() -> FastAPI:
         return {"workflow_id": workflow_id, "signal": "cancel"}
 
     return app
+
+
+def _prepare_workspace(request: CreateWorkflowRequest, workflow_id: str) -> dict[str, Any]:
+    if request.workspace_path:
+        return {
+            "mode": "provided",
+            "workspace_path": str(Path(request.workspace_path).resolve()),
+        }
+
+    if not request.target_repo_path:
+        raise HTTPException(
+            status_code=400,
+            detail="target_repo_path is required when workspace_path is not provided",
+        )
+
+    try:
+        return create_isolated_worktree(
+            target_repo_path=request.target_repo_path,
+            workflow_id=workflow_id,
+            project_id=request.project_id,
+            task_type=request.task_type,
+            base_ref=request.base_ref,
+            worktrees_dir=request.worktrees_dir,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to prepare workspace: {exc}") from exc
 
 
 def main() -> None:

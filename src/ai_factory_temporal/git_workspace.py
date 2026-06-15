@@ -9,6 +9,81 @@ CHECKPOINT_GIT_AUTHOR_NAME = "AI Factory"
 CHECKPOINT_GIT_AUTHOR_EMAIL = "ai-factory@example.invalid"
 
 
+def create_isolated_worktree(
+    *,
+    target_repo_path: str | Path,
+    workflow_id: str,
+    project_id: str,
+    task_type: str,
+    base_ref: str | None = None,
+    worktrees_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    target_repo = Path(target_repo_path).resolve()
+    target_root_result = _git(target_repo, ["rev-parse", "--show-toplevel"], check=False)
+    if target_root_result.returncode != 0:
+        raise ValueError(f"target_repo_path is not a Git repository: {target_repo}")
+
+    target_root = Path(target_root_result.stdout.strip()).resolve()
+    selected_base_ref = base_ref or "HEAD"
+    base_commit = _git(
+        target_root,
+        ["rev-parse", "--verify", f"{selected_base_ref}^{{commit}}"],
+        check=True,
+    ).stdout.strip()
+    branch = f"ai-factory/{workflow_id}/{_safe_ref_segment(task_type)}"
+    parent_dir = (
+        Path(worktrees_dir).resolve()
+        if worktrees_dir is not None
+        else target_root.parent / ".ai-factory-worktrees"
+    )
+    workspace_path = parent_dir / f"{workflow_id}-{_safe_path_segment(project_id)}"
+
+    if workspace_path.exists():
+        raise ValueError(f"worktree path already exists: {workspace_path}")
+
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        _git(
+            target_root,
+            [
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                str(workspace_path),
+                base_commit,
+            ],
+            check=True,
+        )
+    except Exception:
+        _best_effort_git(target_root, ["worktree", "remove", "--force", str(workspace_path)])
+        _best_effort_git(target_root, ["branch", "-D", branch])
+        raise
+
+    return {
+        "mode": "managed_worktree",
+        "target_repo_path": str(target_repo),
+        "target_repo_root": str(target_root),
+        "workspace_path": str(workspace_path),
+        "base_ref": selected_base_ref,
+        "base_commit": base_commit,
+        "branch": branch,
+    }
+
+
+def remove_isolated_worktree(worktree: dict[str, Any]) -> None:
+    workspace_path = worktree.get("workspace_path")
+    target_repo_root = worktree.get("target_repo_root")
+    branch = worktree.get("branch")
+    if workspace_path and target_repo_root:
+        _best_effort_git(
+            Path(target_repo_root),
+            ["worktree", "remove", "--force", str(workspace_path)],
+        )
+    if branch and target_repo_root:
+        _best_effort_git(Path(target_repo_root), ["branch", "-D", str(branch)])
+
+
 def workspace_checkpoint(workspace_path: str | Path) -> dict[str, Any]:
     workspace = Path(workspace_path)
     git_check = _git(
@@ -196,6 +271,25 @@ def _paths_inside_workspace(workspace: Path, paths: list[str | Path]) -> list[st
             continue
         relative_paths.append(relative.as_posix())
     return relative_paths
+
+
+def _safe_path_segment(value: str) -> str:
+    return _safe_segment(value).strip("-") or "project"
+
+
+def _safe_ref_segment(value: str) -> str:
+    return _safe_segment(value).strip(".-/") or "task"
+
+
+def _safe_segment(value: str) -> str:
+    return "".join(char if char.isalnum() or char in "._-" else "-" for char in value)
+
+
+def _best_effort_git(workspace: Path, args: list[str]) -> None:
+    try:
+        _git(workspace, args, check=False)
+    except OSError:
+        return
 
 
 def _git(workspace: Path, args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:

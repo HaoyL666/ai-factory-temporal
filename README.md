@@ -137,19 +137,32 @@ curl -s -X POST http://127.0.0.1:8000/workflows \
     "project_id": "generic-project",
     "task_type": "upgrade",
     "inputs": {"target_version": "1.2.3"},
-    "workspace_path": "."
+    "target_repo_path": "/path/to/target-repo",
+    "base_ref": "main"
   }'
 ```
 
-The API returns immediately:
+The API creates an isolated Git worktree from `target_repo_path`, stores that
+generated worktree as the workflow `workspace_path`, starts Temporal, and
+returns immediately:
 
 ```json
 {
   "workflow_id": "wf-example",
   "status": "PENDING",
-  "temporal_workflow_id": "wf-example"
+  "temporal_workflow_id": "wf-example",
+  "workspace": {
+    "mode": "managed_worktree",
+    "workspace_path": "/path/to/.ai-factory-worktrees/wf-example-generic-project",
+    "branch": "ai-factory/wf-example/upgrade",
+    "base_ref": "main"
+  }
 }
 ```
+
+For local/manual testing, callers may still pass an already prepared
+`workspace_path` instead of `target_repo_path`. In that mode the API does not
+create a worktree.
 
 Crossplane Provider OCI Terraform upgrade example:
 
@@ -161,10 +174,10 @@ curl -s -X POST http://127.0.0.1:8000/workflows \
     "task_type": "terraform_provider_upgrade",
     "inputs": {
       "target_version": "8.13.0",
-      "validation_level": "L1_BUILD_GENERATE",
       "execution_mode": "plan_only"
     },
-    "workspace_path": "/path/to/crossplane-provider-oci"
+    "target_repo_path": "/path/to/crossplane-provider-oci",
+    "base_ref": "main"
   }'
 ```
 
@@ -242,8 +255,9 @@ curl -s -X POST http://127.0.0.1:8000/workflows/wf-example/feedback \
 
 ## Workspace Checkpoints
 
-When `workspace_path` is a Git worktree, the harness treats accepted source
-changes as step checkpoints.
+When the request uses `target_repo_path`, the API creates an isolated Git
+worktree, stores that generated path as the workflow `workspace_path`, and the
+harness treats accepted source changes inside that worktree as step checkpoints.
 
 Successful Codex and deterministic steps commit any workspace source changes
 after the step succeeds. Harness DB and artifact paths are excluded from the
@@ -261,9 +275,9 @@ skip  -> reset workspace to the last checkpoint, mark the step skipped, continue
 abort -> leave the failed workspace as-is, mark the workflow failed
 ```
 
-For production use, pass an isolated target-project worktree as `workspace_path`
-instead of a user's normal checkout. The checkpoint commits then live on the
-workflow branch and the original checkout is not modified.
+For production use, pass `target_repo_path` and an optional `base_ref`; the API
+will create the workflow branch and worktree. Passing `workspace_path` directly
+is still supported for local/manual testing with an already prepared checkout.
 
 ## Failure Classes
 
@@ -543,8 +557,9 @@ Its Terraform provider upgrade workflow models a provider-owner review process:
 AI-owned scoping/version edits/risk analysis, deterministic evidence collection,
 approval-gated publish/install/live OCI validation, and final review packet
 assembly. The included deterministic scripts are local-safe by default and write
-evidence artifacts instead of publishing, mutating clusters, or calling live OCI
-APIs.
+evidence artifacts. With `execution_mode: "execute"`, generation/build steps run
+their configured Make commands, and approval-gated steps run only explicitly
+provided publish/install/live validation commands.
 
 Workflow YAML references task-specific prompts:
 
