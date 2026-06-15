@@ -20,9 +20,18 @@ class AIFactoryWorkflow:
         self.feedback_events: list[dict[str, Any]] = []
         self.cancel_requested = False
         self.cancel_reason: str | None = None
+        self.last_checkpoint_commit: str | None = None
 
     @workflow.run
     async def run(self, spec: dict[str, Any]) -> dict[str, Any]:
+        initial_checkpoint = await self._activity(
+            "get_workspace_checkpoint",
+            {"workspace_path": spec["workspace_path"]},
+            activity_id="workspace-checkpoint-initial",
+            summary="Capture initial workspace checkpoint",
+        )
+        self.last_checkpoint_commit = initial_checkpoint.get("commit")
+
         await self._set_workflow_status(
             spec,
             WorkflowStatus.RUNNING.value,
@@ -38,8 +47,14 @@ class AIFactoryWorkflow:
             self.current_step_id = step["id"]
             await self._record_step_timeline_event(spec, "start", step, step_order)
             if step["kind"] == "approval":
-                result = await self._run_approval_step(spec, step, step_order)
+                result = await self._run_approval_step(
+                    spec,
+                    step,
+                    step_order,
+                    self.last_checkpoint_commit,
+                )
                 previous_outputs.append(result)
+                self._update_last_checkpoint(result)
                 await self._record_step_timeline_event(
                     spec,
                     "finish",
@@ -76,8 +91,15 @@ class AIFactoryWorkflow:
                     return {"workflow_id": spec["workflow_id"], "status": self.status}
                 continue
 
-            result = await self._run_retryable_step(spec, step, previous_outputs, step_order)
+            result = await self._run_retryable_step(
+                spec,
+                step,
+                previous_outputs,
+                step_order,
+                self.last_checkpoint_commit,
+            )
             previous_outputs.append(result)
+            self._update_last_checkpoint(result)
             await self._record_step_timeline_event(
                 spec,
                 "finish",
@@ -141,6 +163,7 @@ class AIFactoryWorkflow:
             "pending_failure": self.pending_failure,
             "queued_feedback": len(self.feedback_events),
             "cancel_requested": self.cancel_requested,
+            "last_checkpoint_commit": self.last_checkpoint_commit,
         }
 
     async def _run_approval_step(
@@ -148,6 +171,7 @@ class AIFactoryWorkflow:
         spec: dict[str, Any],
         step: dict[str, Any],
         step_order: int,
+        last_checkpoint_commit: str | None,
     ) -> dict[str, Any]:
         self.pending_approval_step_id = step["id"]
         await self._activity(
@@ -234,7 +258,13 @@ class AIFactoryWorkflow:
         nested_step.setdefault("kind", "deterministic")
         nested_step.setdefault("runner", "script")
         nested_step.setdefault("name", step.get("name", step["id"]))
-        return await self._run_retryable_step(spec, nested_step, [], step_order)
+        return await self._run_retryable_step(
+            spec,
+            nested_step,
+            [],
+            step_order,
+            last_checkpoint_commit,
+        )
 
     async def _run_retryable_step(
         self,
@@ -242,6 +272,7 @@ class AIFactoryWorkflow:
         step: dict[str, Any],
         previous_outputs: list[dict[str, Any]],
         step_order: int,
+        last_checkpoint_commit: str | None,
     ) -> dict[str, Any]:
         feedback_retry_count = 0
         retry_feedback: dict[str, Any] | None = None
@@ -346,6 +377,19 @@ class AIFactoryWorkflow:
             )
             action = feedback.get("action", "retry")
             if action == "retry" and feedback_retry_count < max_feedback_retries:
+                await self._reset_workspace_to_checkpoint(
+                    spec,
+                    last_checkpoint_commit,
+                    activity_id=(
+                        f"reset-retry-{self._timeline_step_ref(step_order, step['id'])}"
+                        f"-step-run-{feedback_retry_count + 1}"
+                    ),
+                    summary=self._timeline_summary(
+                        "Reset workspace before retry",
+                        step_order,
+                        step["id"],
+                    ),
+                )
                 feedback_retry_count += 1
                 retry_feedback = feedback
                 self.pending_failure = None
@@ -365,6 +409,19 @@ class AIFactoryWorkflow:
                 continue
             if action == "skip" and step.get("allow_skip", False):
                 self.pending_failure = None
+                reset_result = await self._reset_workspace_to_checkpoint(
+                    spec,
+                    last_checkpoint_commit,
+                    activity_id=(
+                        f"reset-skip-{self._timeline_step_ref(step_order, step['id'])}"
+                        f"-step-run-{feedback_retry_count + 1}"
+                    ),
+                    summary=self._timeline_summary(
+                        "Reset workspace before skip",
+                        step_order,
+                        step["id"],
+                    ),
+                )
                 await self._set_workflow_status(
                     spec,
                     WorkflowStatus.RUNNING.value,
@@ -381,6 +438,7 @@ class AIFactoryWorkflow:
                         "workflow_id": spec["workflow_id"],
                         "step_id": step["id"],
                         "reason": feedback.get("message", "skipped after feedback"),
+                        "reset": reset_result,
                     },
                     activity_id=f"skip-{self._timeline_step_ref(step_order, step['id'])}",
                     summary=self._timeline_summary("Step skipped", step_order, step["id"]),
@@ -416,6 +474,37 @@ class AIFactoryWorkflow:
             summary=f"Workflow CANCELLED: {self.cancel_reason or 'cancel requested'}",
         )
         return True
+
+    async def _reset_workspace_to_checkpoint(
+        self,
+        spec: dict[str, Any],
+        checkpoint_commit: str | None,
+        *,
+        activity_id: str,
+        summary: str,
+    ) -> dict[str, Any]:
+        return await self._activity(
+            "reset_workspace_to_checkpoint",
+            {
+                "workspace_path": spec["workspace_path"],
+                "checkpoint_commit": checkpoint_commit,
+                "db_path": spec["db_path"],
+                "artifacts_path": spec["artifacts_path"],
+            },
+            activity_id=activity_id,
+            summary=summary,
+        )
+
+    def _update_last_checkpoint(self, result: dict[str, Any]) -> None:
+        output = result.get("output")
+        if not isinstance(output, dict):
+            return
+        checkpoint = output.get("checkpoint")
+        if not isinstance(checkpoint, dict):
+            return
+        commit = checkpoint.get("commit")
+        if isinstance(commit, str) and commit:
+            self.last_checkpoint_commit = commit
 
     def _has_feedback_for_step(self, step_id: str) -> bool:
         return any(event.get("step_id") == step_id for event in self.feedback_events)

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ai_factory_temporal import activities, config
 from ai_factory_temporal.activities import run_codex_step
@@ -93,6 +95,82 @@ class CodexContractTest(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertIn("Codex output contract violation", result["error"])
+
+    def test_codex_step_declared_failure_writes_failed_step_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = SQLiteStore(tmp_path / "test.db")
+            workflow_id = new_workflow_id()
+            step = {
+                "id": "codex_failed_contract",
+                "name": "Codex Failed Contract",
+                "kind": "codex",
+                "prompt": "prompts/task.md",
+                "output_contract": "status_json",
+            }
+            project_dir = tmp_path / "project"
+            (project_dir / "prompts").mkdir(parents=True)
+            (project_dir / "prompts" / "task.md").write_text("# Task\n", encoding="utf-8")
+            store.create_workflow(
+                workflow_id=workflow_id,
+                project_id="generic-project",
+                task_type="failed-contract",
+                inputs={},
+                workspace_path=str(tmp_path),
+                steps=[step],
+            )
+
+            final_response = json.dumps(
+                {
+                    "status": "FAILED",
+                    "summary": "Codex reported a business failure.",
+                    "error": "intentional failed contract",
+                }
+            )
+
+            def fake_codex_turn(**kwargs):
+                kwargs["prompt_path"].write_text(kwargs["prompt"], encoding="utf-8")
+                kwargs["output_path"].write_text(final_response, encoding="utf-8")
+                metadata = {
+                    "mode": "sdk",
+                    "thread_id": "thread-failed",
+                    "turn_id": "turn-failed",
+                    "usage": None,
+                }
+                kwargs["metadata_path"].write_text(
+                    json.dumps(metadata, sort_keys=True),
+                    encoding="utf-8",
+                )
+                return {"final_response": final_response, "metadata": metadata}
+
+            with patch("ai_factory_temporal.activities._run_codex_turn", fake_codex_turn):
+                result = run_codex_step(
+                    {
+                        "workflow_id": workflow_id,
+                        "project_id": "generic-project",
+                        "task_type": "failed-contract",
+                        "inputs": {},
+                        "workspace_path": str(tmp_path),
+                        "project_pack": {},
+                        "project_dir": str(project_dir),
+                        "db_path": str(tmp_path / "test.db"),
+                        "artifacts_path": str(tmp_path / "artifacts"),
+                        "step": step,
+                        "previous_outputs": [],
+                        "feedback_retry_count": 0,
+                    }
+                )
+
+            step_result = json.loads(
+                (Path(result["artifact_uri"]) / "step-result.json").read_text(encoding="utf-8")
+            )
+            stored = store.list_steps(workflow_id)[0]
+            self.assertEqual(result["status"], StepStatus.FAILED.value)
+            self.assertEqual(result["output"]["status"], StepStatus.FAILED.value)
+            self.assertEqual(step_result["status"], StepStatus.FAILED.value)
+            self.assertEqual(stored["status"], StepStatus.FAILED.value)
+            self.assertEqual(stored["output"]["status"], StepStatus.FAILED.value)
+            self.assertEqual(stored["output"]["contract_status"], "FAILED")
 
     def test_review_contract_accepts_changes_requested(self) -> None:
         result = _evaluate_codex_review_contract(

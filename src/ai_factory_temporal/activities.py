@@ -28,6 +28,11 @@ from ai_factory_temporal.codex_runner import (
     codex_review_config as _codex_review_config,
     run_codex_turn as _run_codex_turn,
 )
+from ai_factory_temporal.git_workspace import (
+    commit_step_checkpoint,
+    reset_workspace_to_checkpoint as _reset_workspace_to_checkpoint,
+    workspace_checkpoint,
+)
 from ai_factory_temporal.models import StepStatus
 from ai_factory_temporal.prompting import render_prompt
 from ai_factory_temporal.review_prompts import (
@@ -50,6 +55,20 @@ def set_workflow_status(payload: dict[str, Any]) -> None:
 @activity.defn(name="record_step_timeline_event")
 def record_step_timeline_event(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
+
+
+@activity.defn(name="get_workspace_checkpoint")
+def get_workspace_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    return workspace_checkpoint(payload["workspace_path"])
+
+
+@activity.defn(name="reset_workspace_to_checkpoint")
+def reset_workspace_to_checkpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    return _reset_workspace_to_checkpoint(
+        workspace_path=payload["workspace_path"],
+        checkpoint_commit=payload.get("checkpoint_commit"),
+        preserve_paths=_harness_paths(payload),
+    )
 
 
 @activity.defn(name="record_approval_wait")
@@ -80,6 +99,8 @@ def record_approval_decision(payload: dict[str, Any]) -> None:
 @activity.defn(name="record_step_skipped")
 def record_step_skipped(payload: dict[str, Any]) -> dict[str, Any]:
     output = {"decision": "skipped", "reason": payload.get("reason", "step skipped")}
+    if "reset" in payload:
+        output["reset"] = payload["reset"]
     SQLiteStore(Path(payload["db_path"])).finish_step(
         workflow_id=payload["workflow_id"],
         step_id=payload["step_id"],
@@ -275,6 +296,14 @@ def run_script_step(payload: dict[str, Any]) -> dict[str, Any]:
         timeout_seconds=timeout_seconds,
         error=None,
     )
+    _attach_step_checkpoint(
+        output=output,
+        payload=payload,
+        step=step,
+        feedback_retry_count=feedback_retry_count,
+        artifact_dir=artifact_dir,
+    )
+    _write_json(artifact_dir / STEP_RESULT_FILENAME, output)
     store.finish_step(
         workflow_id=workflow_id,
         step_id=step_id,
@@ -437,6 +466,13 @@ def _run_single_codex_step(
         )
     output["artifact_uri"] = str(artifact_dir)
     output["step_result"] = str(artifact_dir / STEP_RESULT_FILENAME)
+    _attach_step_checkpoint(
+        output=output,
+        payload=payload,
+        step=step,
+        feedback_retry_count=feedback_retry_count,
+        artifact_dir=artifact_dir,
+    )
     _write_json(artifact_dir / STEP_RESULT_FILENAME, output)
     store.finish_step(
         workflow_id=workflow_id,
@@ -635,6 +671,8 @@ def _run_reviewed_codex_step(
         if review_contract["verdict"] == "APPROVED":
             return _finish_reviewed_codex_success(
                 store=store,
+                payload=payload,
+                step=step,
                 workflow_id=workflow_id,
                 step_id=step_id,
                 feedback_retry_count=feedback_retry_count,
@@ -690,6 +728,8 @@ def _run_reviewed_codex_step(
 def _finish_reviewed_codex_success(
     *,
     store: SQLiteStore,
+    payload: dict[str, Any],
+    step: dict[str, Any],
     workflow_id: str,
     step_id: str,
     feedback_retry_count: int,
@@ -707,6 +747,13 @@ def _finish_reviewed_codex_success(
         error=None,
     )
     output = _reviewed_step_output(artifact_dir, final_contract, review_history)
+    _attach_step_checkpoint(
+        output=output,
+        payload=payload,
+        step=step,
+        feedback_retry_count=feedback_retry_count,
+        artifact_dir=artifact_dir,
+    )
     _write_json(artifact_dir / "step-result.json", output)
     store.finish_step(
         workflow_id=workflow_id,
@@ -878,6 +925,32 @@ def _record_codex_usage(
     )
 
 
+def _attach_step_checkpoint(
+    *,
+    output: dict[str, Any],
+    payload: dict[str, Any],
+    step: dict[str, Any],
+    feedback_retry_count: int,
+    artifact_dir: Path,
+) -> None:
+    output["checkpoint"] = commit_step_checkpoint(
+        workspace_path=payload["workspace_path"],
+        workflow_id=payload["workflow_id"],
+        step_id=step["id"],
+        step_run_number=feedback_retry_count + 1,
+        runner=str(output.get("runner") or step.get("runner") or step.get("kind") or "unknown"),
+        artifact_uri=str(artifact_dir),
+        exclude_paths=_harness_paths(payload),
+    )
+
+
+def _harness_paths(payload: dict[str, Any]) -> list[str]:
+    return [
+        str(payload["db_path"]),
+        str(payload["artifacts_path"]),
+    ]
+
+
 def _script_step_output(
     *,
     step: dict[str, Any],
@@ -956,7 +1029,7 @@ def _finish_failed(
     output: dict[str, Any],
     error: str,
 ) -> dict[str, Any]:
-    output.setdefault("status", StepStatus.FAILED.value)
+    output["status"] = StepStatus.FAILED.value
     output.setdefault("summary", error)
     output.setdefault("artifact_uri", str(artifact_dir))
     output.setdefault("step_result", str(artifact_dir / STEP_RESULT_FILENAME))

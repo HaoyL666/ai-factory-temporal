@@ -8,6 +8,7 @@ from temporalio.worker import Worker
 
 from ai_factory_temporal import config
 from ai_factory_temporal.activities import (
+    get_workspace_checkpoint,
     record_approval_decision,
     record_approval_wait,
     record_feedback,
@@ -16,6 +17,7 @@ from ai_factory_temporal.activities import (
     record_step_succeeded,
     record_step_timeline_event,
     record_step_waiting_for_feedback,
+    reset_workspace_to_checkpoint,
     run_codex_step,
     run_script_step,
     set_workflow_status,
@@ -32,6 +34,8 @@ async def run_worker() -> None:
             workflows=[AIFactoryWorkflow],
             activities=[
                 set_workflow_status,
+                get_workspace_checkpoint,
+                reset_workspace_to_checkpoint,
                 record_approval_wait,
                 record_approval_decision,
                 record_step_skipped,

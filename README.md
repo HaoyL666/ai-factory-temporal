@@ -240,6 +240,31 @@ curl -s -X POST http://127.0.0.1:8000/workflows/wf-example/feedback \
   }'
 ```
 
+## Workspace Checkpoints
+
+When `workspace_path` is a Git worktree, the harness treats accepted source
+changes as step checkpoints.
+
+Successful Codex and deterministic steps commit any workspace source changes
+after the step succeeds. Harness DB and artifact paths are excluded from the
+checkpoint commit, even if they are inside the workspace during local testing.
+
+If a step fails and the workflow enters `WAITING_FOR_FEEDBACK`, the harness does
+not commit or reset the failed workspace state. This leaves the failed state
+available for inspection.
+
+Feedback actions handle the failed state differently:
+
+```text
+retry -> reset workspace to the last checkpoint, clean untracked source files, rerun the step
+skip  -> reset workspace to the last checkpoint, mark the step skipped, continue
+abort -> leave the failed workspace as-is, mark the workflow failed
+```
+
+For production use, pass an isolated target-project worktree as `workspace_path`
+instead of a user's normal checkout. The checkpoint commits then live on the
+workflow branch and the original checkout is not modified.
+
 ## Failure Classes
 
 The harness separates admission errors, business failures, and system failures.
