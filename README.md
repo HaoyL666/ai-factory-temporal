@@ -1,40 +1,56 @@
 # Local AI Factory With Temporal
 
-Local AI Factory runtime for executing project-specific AI workflows with
-Temporal, FastAPI, SQLite, Codex SDK activities, deterministic script steps,
-approval gates, and feedback loops.
+Local AI Factory is a Temporal-backed workflow harness for running predefined
+AI-assisted engineering workflows. A user submits a project task to the API, the
+API creates a workflow instance, Temporal runs the durable execution loop, and
+workers execute each step as either a Codex SDK activity, a deterministic script,
+or a human approval gate.
 
-The runtime shape is:
+The harness is project-agnostic. Each project contributes a project pack,
+workflow YAML, prompts, and optional scripts. The runtime owns the common
+execution behavior: isolated worktrees, step state, feedback loops, approval
+signals, artifacts, Codex review loops, usage tracking, and durable progression
+through Temporal.
+
+## Architecture
 
 ```text
 User / CLI / UI
   -> FastAPI service
-      -> creates workflow + step rows in SQLite
-      -> starts Temporal workflow
+      -> validates project pack and workflow YAML
+      -> creates an isolated target-repo worktree
+      -> creates workflow and step rows in SQLite
+      -> starts a Temporal workflow
       -> returns workflow_id immediately
 
-Temporal worker
-  -> runs durable workflow loop
-  -> executes Codex activities
-  -> executes deterministic script activities
+Temporal workflow
+  -> runs the ordered step loop durably
   -> waits for approval and feedback signals
-  -> updates SQLite after each transition
+  -> asks activities to update product-facing SQLite state
+
+Temporal worker
+  -> executes Codex SDK activities
+  -> executes deterministic script activities
+  -> records step artifacts, usage, checkpoints, approvals, and feedback
 
 SQLite app DB
-  -> product/query state
-  -> workflow rows
-  -> step rows
-  -> feedback and approval rows
+  -> workflows
+  -> workflow_steps
+  -> workflow_feedback
+  -> workflow_approvals
+  -> workflow_usage
 
 var/artifacts
-  -> prompts
-  -> Codex responses
-  -> script logs
-  -> validation reports
+  -> rendered prompts
+  -> Codex responses and SDK metadata
+  -> review-round contracts
+  -> script stdout/stderr
+  -> artifact manifests
+  -> normalized step-result.json files
 ```
 
-Temporal owns durable execution. SQLite owns product-facing status and queryable
-state.
+Temporal owns durable execution. SQLite owns product-facing query state.
+Artifacts own the audit trail for prompts, outputs, scripts, and evidence.
 
 ## Install
 
@@ -46,31 +62,23 @@ python -m pip install -e '.[dev]'
 ```
 
 After activation, `ai-factory-api`, `ai-factory-worker`, `pytest`, and the
-Python dependencies all come from this project-local virtual environment.
+Python dependencies come from this project-local virtual environment.
 
-## Start Local Temporal
+## Run Locally
 
-Install the Temporal CLI if needed, then start the dev server:
+Start Temporal:
 
 ```bash
 temporal server start-dev
 ```
 
-The default address used by this project is:
-
-```text
-127.0.0.1:7233
-```
-
-Override it with:
+The default Temporal address is `127.0.0.1:7233`. Override it with:
 
 ```bash
 export AI_FACTORY_TEMPORAL_ADDRESS=127.0.0.1:7233
 ```
 
-## Run Worker
-
-In another terminal:
+Start a worker in another terminal:
 
 ```bash
 cd ~/Desktop/ai-factory-temporal
@@ -78,30 +86,48 @@ source .venv/bin/activate
 ai-factory-worker
 ```
 
-For local no-Codex smoke tests, run the worker in Codex stub mode:
+For local no-Codex smoke tests, use stub mode:
 
 ```bash
-source .venv/bin/activate
 AI_FACTORY_CODEX_MODE=stub ai-factory-worker
 ```
 
-For real Codex SDK mode, use the default:
+For real Codex SDK mode, the worker must run with normal user access to Codex
+local state, usually `~/.codex`. If the worker is launched from a restricted
+sandbox that can only read `~/.codex`, Codex SDK initialization can fail before
+the model runs.
+
+Start the API in another terminal:
 
 ```bash
+cd ~/Desktop/ai-factory-temporal
 source .venv/bin/activate
-ai-factory-worker
+ai-factory-api
 ```
 
-Codex settings:
+Or run Uvicorn directly:
 
 ```bash
+uvicorn ai_factory_temporal.api:create_app --factory --reload
+```
+
+## Configuration
+
+Common runtime settings:
+
+```bash
+export AI_FACTORY_TEMPORAL_ADDRESS=127.0.0.1:7233
+export AI_FACTORY_TASK_QUEUE=ai-factory-local
+export AI_FACTORY_DB=var/ai_factory.db
+export AI_FACTORY_ARTIFACTS=var/artifacts
+export AI_FACTORY_CODEX_MODE=real
 export AI_FACTORY_CODEX_MODEL=
 export AI_FACTORY_CODEX_SANDBOX=workspace-write
 export AI_FACTORY_CODEX_APPROVAL_MODE=auto_review
 ```
 
-Optional cost settings use prices per 1M tokens. If these are unset, the
-harness still records tokens and leaves estimated cost as `null`.
+Optional cost settings use prices per 1M tokens. If unset, the harness records
+tokens and leaves estimated cost as `null`.
 
 ```bash
 export AI_FACTORY_COST_CURRENCY=USD
@@ -111,24 +137,10 @@ export AI_FACTORY_CACHE_READ_TOKEN_PRICE_PER_1M=
 export AI_FACTORY_CACHE_CREATION_TOKEN_PRICE_PER_1M=
 ```
 
-## Run API
-
-In another terminal:
-
-```bash
-cd ~/Desktop/ai-factory-temporal
-source .venv/bin/activate
-ai-factory-api
-```
-
-Or:
-
-```bash
-source .venv/bin/activate
-uvicorn ai_factory_temporal.api:create_app --factory --reload
-```
-
 ## Submit A Workflow
+
+Most requests should pass a target repository. The API creates an isolated Git
+worktree and runs the workflow there.
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/workflows \
@@ -142,9 +154,7 @@ curl -s -X POST http://127.0.0.1:8000/workflows \
   }'
 ```
 
-The API creates an isolated Git worktree from `target_repo_path`, stores that
-generated worktree as the workflow `workspace_path`, starts Temporal, and
-returns immediately:
+Example response:
 
 ```json
 {
@@ -160,26 +170,8 @@ returns immediately:
 }
 ```
 
-For local/manual testing, callers may still pass an already prepared
-`workspace_path` instead of `target_repo_path`. In that mode the API does not
-create a worktree.
-
-Crossplane Provider OCI Terraform upgrade example:
-
-```bash
-curl -s -X POST http://127.0.0.1:8000/workflows \
-  -H 'content-type: application/json' \
-  -d '{
-    "project_id": "crossplane-provider-oci",
-    "task_type": "terraform_provider_upgrade",
-    "inputs": {
-      "target_version": "8.13.0",
-      "execution_mode": "plan_only"
-    },
-    "target_repo_path": "/path/to/crossplane-provider-oci",
-    "base_ref": "main"
-  }'
-```
+For local/manual testing, callers may pass an already prepared `workspace_path`
+instead of `target_repo_path`. In that mode the API does not create a worktree.
 
 Check product state:
 
@@ -199,9 +191,33 @@ Check Codex token and cost tracking:
 curl -s http://127.0.0.1:8000/workflows/wf-example/usage
 ```
 
+## Crossplane Provider OCI Example
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/workflows \
+  -H 'content-type: application/json' \
+  -d '{
+    "project_id": "crossplane-provider-oci",
+    "task_type": "terraform_provider_upgrade",
+    "inputs": {
+      "target_version": "8.13.0",
+      "execution_mode": "plan_only"
+    },
+    "target_repo_path": "/path/to/crossplane-provider-oci",
+    "base_ref": "main"
+  }'
+```
+
+`execution_mode: "plan_only"` keeps deterministic scripts local-safe: they write
+evidence artifacts without publishing, mutating clusters, or calling live OCI
+APIs. With `execution_mode: "execute"`, generation/build steps run configured
+commands, and approval-gated publish/install/live validation steps run only
+explicitly provided commands.
+
 ## Approval
 
-When the workflow reaches the approval step:
+When a workflow reaches an approval step, it moves to `WAITING_FOR_APPROVAL`.
+Approve it with:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/workflows/wf-example/approve \
@@ -213,9 +229,12 @@ curl -s -X POST http://127.0.0.1:8000/workflows/wf-example/approve \
   }'
 ```
 
+If an approval step has an `approved_step`, the nested deterministic step runs
+after approval. If approval is denied, the approval step is marked skipped.
+
 ## Feedback Loop
 
-If a step fails, the workflow moves to `WAITING_FOR_FEEDBACK`.
+When a business failure occurs, the workflow moves to `WAITING_FOR_FEEDBACK`.
 
 Retry:
 
@@ -253,21 +272,29 @@ curl -s -X POST http://127.0.0.1:8000/workflows/wf-example/feedback \
   }'
 ```
 
-## Workspace Checkpoints
+Retry and skip reset the workspace to the last successful checkpoint before
+continuing. Abort leaves the failed workspace state available for inspection and
+marks the workflow failed.
 
-When the request uses `target_repo_path`, the API creates an isolated Git
-worktree, stores that generated path as the workflow `workspace_path`, and the
-harness treats accepted source changes inside that worktree as step checkpoints.
+## Workflow Semantics
 
-Successful Codex and deterministic steps commit any workspace source changes
-after the step succeeds. Harness DB and artifact paths are excluded from the
-checkpoint commit, even if they are inside the workspace during local testing.
+### Step Kinds
 
-If a step fails and the workflow enters `WAITING_FOR_FEEDBACK`, the harness does
-not commit or reset the failed workspace state. This leaves the failed state
-available for inspection.
+Workflows are sequential and predefined in YAML. Each step is one of:
 
-Feedback actions handle the failed state differently:
+```text
+codex         -> run a Codex SDK turn, optionally with an internal review loop
+deterministic -> run a configured script command
+approval      -> wait for a user approval signal, then optionally run a script
+```
+
+### Checkpoints
+
+Successful Codex and deterministic steps commit source changes in the managed
+worktree as step checkpoints. Harness DB and artifact paths are excluded from
+checkpoint commits.
+
+On feedback:
 
 ```text
 retry -> reset workspace to the last checkpoint, clean untracked source files, rerun the step
@@ -275,78 +302,26 @@ skip  -> reset workspace to the last checkpoint, mark the step skipped, continue
 abort -> leave the failed workspace as-is, mark the workflow failed
 ```
 
-For production use, pass `target_repo_path` and an optional `base_ref`; the API
-will create the workflow branch and worktree. Passing `workspace_path` directly
-is still supported for local/manual testing with an already prepared checkout.
+### Failure Classes
 
-## Failure Classes
+Admission errors are caught by the API before a DB row or Temporal workflow is
+created. Examples: unsupported task, invalid workflow YAML, missing prompt, or
+invalid step config.
 
-The harness separates admission errors, business failures, and system failures.
+Business failures mean the step ran correctly but the task result failed.
+Examples: script nonzero exit, script timeout, Codex timeout, Codex malformed
+contract, or Codex contract status `FAILED`. These move to
+`WAITING_FOR_FEEDBACK`.
 
-Admission errors are static project/workflow definition problems caught by the
-API before a workflow row or Temporal execution is created:
-
-```text
-unsupported task for the selected project
-missing script command in workflow YAML
-missing prompt template or prompt include
-invalid Codex output_contract config
-invalid step kind, timeout, feedback retry, or skip configuration
-```
-
-Admission errors return HTTP 400. Fix the project pack, workflow YAML, or prompt
-files and submit the request again.
-
-Business failures mean the step ran correctly but the task result failed:
-
-```text
-script exited non-zero
-script timed out
-Codex returned status FAILED/ERROR/NEEDS_FEEDBACK
-Codex step timed out
-Codex returned malformed contract output
-```
-
-Business failures move the workflow to `WAITING_FOR_FEEDBACK`, where the user can
-retry, skip if allowed, or abort.
-
-System failures mean the admitted workflow hit a harness, worker, dependency, or
-runtime bug while executing:
-
-```text
-workflow code exception
-activity code exception
-installed dependency missing or broken
-Codex SDK/runtime exception
-```
-
-System failures are allowed to throw into Temporal. Temporal keeps the execution
-running while workflow-task and activity failures are retried and visible in
-Temporal UI as Temporal attempts. This mirrors normal Temporal behavior: deploy
-a code/config/dependency fix, then the workflow can continue without asking the
-user for business feedback.
+System failures are worker, dependency, harness, or runtime failures. Examples:
+activity code exception, missing dependency, or Codex SDK initialization failure.
+These throw into Temporal and are retried/visible as Temporal failures. Fix the
+code or worker environment and let Temporal continue.
 
 ## Codex Output Contract
 
-Every Codex step must return a structured status contract. This is the Codex
-equivalent of a script exit code: the harness uses it to decide whether the step
-succeeded or should pause for feedback.
-
-The default contract requires a JSON object with a `status` field. A workflow can
-customize the contract with `output_contract`, for example to require additional
-fields:
-
-```yaml
-- id: plan_upgrade
-  kind: codex
-  prompt: prompts/terraform_upgrade/plan_upgrade.md
-  output_contract:
-    type: status_json
-    required_fields:
-      - summary
-```
-
-The Codex final response must contain a JSON object:
+Every Codex step returns a structured status contract. This is the Codex
+equivalent of a script exit code.
 
 ```json
 {
@@ -358,60 +333,30 @@ The Codex final response must contain a JSON object:
 }
 ```
 
-The harness treats these as success statuses:
+Success statuses:
 
 ```text
 SUCCEEDED, SUCCESS, OK
 ```
 
-The harness treats these as failed statuses and pauses the workflow at
-`WAITING_FOR_FEEDBACK`:
+Failure statuses:
 
 ```text
 FAILED, FAILURE, ERROR, NEEDS_FEEDBACK
 ```
 
-Malformed contract output also fails the step. This means Codex task-level
-failure does not depend only on SDK exceptions. Codex timeouts and
-contract-declared failures are business failures and move into the feedback path;
-Codex SDK/runtime exceptions are system failures and surface through Temporal's
-task/activity failure retry behavior.
+Workflow YAML can require additional fields:
 
-## Deterministic Step Artifacts
-
-Script steps receive a harness-created artifact directory:
-
-```text
-AI_FACTORY_ARTIFACT_DIR=var/artifacts/<workflow_id>/<step_id>/step-run-N
+```yaml
+- id: plan_upgrade
+  kind: codex
+  prompt: prompts/terraform_upgrade/plan_upgrade.md
+  output_contract:
+    type: status_json
+    required_fields:
+      - summary
+      - changed_files
 ```
-
-The script can write any files there. The harness always captures `stdout.log`
-and `stderr.log`, scans the artifact directory, writes `artifact-manifest.json`,
-and writes a normalized `step-result.json`.
-
-If the script also writes `result.json`, the harness includes it as
-`script_result` in the normalized step output. This is optional; simple scripts
-can just exit `0` or nonzero and write whatever evidence files they have.
-
-Later Codex steps receive previous step outputs with the artifact directory,
-manifest path, and discovered artifact list, so prompts do not need to hardcode
-every deterministic output file name.
-
-## Token And Cost Tracking
-
-Every Codex turn records one `workflow_usage` row with the workflow id, step id,
-step run number, role (`coder` or `reviewer`), review round, model, raw SDK usage,
-normalized token counts, and optional estimated cost.
-
-The normalized counts are also returned from:
-
-```text
-GET /workflows/{workflow_id}
-GET /workflows/{workflow_id}/usage
-```
-
-Cost tracking is observational only. The harness does not enforce budgets or
-stop workflows based on cost.
 
 ## Codex Review Loop
 
@@ -421,12 +366,13 @@ Codex steps can opt into an internal coder/reviewer loop:
 - id: implement_change
   kind: codex
   prompt: prompts/task/implement_change.md
-  review: true
+  review:
+    enabled: true
+    max_review_rounds: 3
 ```
 
-Use `review: { enabled: true, max_review_rounds: 3 }` when a step needs a
-custom repair cap. When review is enabled, one outer Temporal step can run
-multiple internal review rounds:
+When review is enabled, one Temporal step can run multiple internal review
+rounds:
 
 ```text
 step-run-1/
@@ -442,8 +388,8 @@ step-run-1/
   step-result.json
 ```
 
-The coder still returns the normal Codex output contract. The reviewer runs in
-read-only mode by default and returns:
+The coder returns the normal Codex output contract. The reviewer runs read-only
+by default and returns:
 
 ```json
 {
@@ -457,44 +403,60 @@ read-only mode by default and returns:
 ```
 
 `APPROVED` finishes the Codex step. `CHANGES_REQUESTED` starts another coder
-repair round until `max_review_rounds` is reached. A final rejection or
-blocked review makes the step fail and moves the workflow to the normal feedback
-path. The DB stores one synthesized final step contract; the artifacts preserve
-every coder and reviewer contract.
+repair round until `max_review_rounds` is reached. A final rejection fails the
+step and moves the workflow to the normal feedback path.
 
-Reviewer prompts use one generic structure for every project and task: original
-task prompt, current coder round metadata, optional repair context, coder final
-response, parsed coder contract, current workspace diff, compact prior review
-history, and the fixed review output contract. Full coder prompts are kept as
-artifacts but are not embedded into reviewer prompts.
+## Deterministic Step Artifacts
 
-## E2E Smoke Workflows
-
-The sample `generic-project` includes a few local smoke workflows:
+Script steps receive these environment variables:
 
 ```text
-codex_edit_e2e
-  Runs a real Codex SDK edit, then verifies the edited file with a script.
-
-fail_once_retry_e2e
-  Fails once, waits for feedback, then succeeds after a retry signal.
-
-fail_once_skip_e2e
-  Fails an optional step, waits for feedback, skips it, then continues.
-
-codex_timeout_e2e
-  Forces a Codex timeout and waits for feedback.
-
-review_retry_chain_e2e
-  Runs a reviewed Codex repair loop, then a failed Codex step with feedback retry.
-
-approval_first
-  Pauses immediately at an approval gate.
+AI_FACTORY_WORKFLOW_ID
+AI_FACTORY_STEP_ID
+AI_FACTORY_ARTIFACT_DIR
+AI_FACTORY_INPUTS_JSON
+AI_FACTORY_WORKSPACE_PATH
+AI_FACTORY_FEEDBACK_RETRY_COUNT
+AI_FACTORY_RETRY_FEEDBACK_JSON
 ```
 
-## Add Another Project
+The harness captures:
 
-Create:
+```text
+stdout.log
+stderr.log
+artifact-manifest.json
+step-result.json
+```
+
+If a script writes `result.json`, the harness includes it as `script_result` in
+the normalized output. Later Codex steps receive previous step outputs,
+including artifact directories, manifest paths, and discovered artifact lists.
+
+## Token And Cost Tracking
+
+Every Codex turn records one `workflow_usage` row with:
+
+```text
+workflow id
+step id
+step run number
+role: coder or reviewer
+review round
+mode
+model
+thread id / turn id
+raw SDK usage
+normalized token counts
+optional estimated cost
+```
+
+Cost tracking is observational only. The harness does not enforce budgets or
+stop workflows based on cost.
+
+## Project Layout
+
+Add a project by creating:
 
 ```text
 projects/<project-id>/project_pack.yaml
@@ -508,7 +470,7 @@ The Temporal workflow does not know project-specific logic. It only reads the
 project pack, workflow YAML, step kind, prompt, runner config, inputs, and
 previous outputs.
 
-The sample project uses this layout:
+The sample generic project:
 
 ```text
 projects/generic-project/
@@ -516,6 +478,7 @@ projects/generic-project/
   workflows/
     upgrade.yaml
     codex_edit_e2e.yaml
+    review_retry_chain_e2e.yaml
     ...
   prompts/
     _shared/
@@ -525,8 +488,6 @@ projects/generic-project/
     terraform_upgrade/
       plan_upgrade.md
       final_summary.md
-    bug_fix/
-      README.md
     smoke_codex_edit/
       codex_edit_file.md
   scripts/
@@ -535,7 +496,7 @@ projects/generic-project/
     ...
 ```
 
-The `crossplane-provider-oci` project follows the same generated-file style:
+The Crossplane Provider OCI project follows the same generated-file style:
 
 ```text
 projects/crossplane-provider-oci/
@@ -553,28 +514,38 @@ projects/crossplane-provider-oci/
     record_live_oci_validation_gate.py
 ```
 
-Its Terraform provider upgrade workflow models a provider-owner review process:
-AI-owned scoping/version edits/risk analysis, deterministic evidence collection,
-approval-gated publish/install/live OCI validation, and final review packet
-assembly. The included deterministic scripts are local-safe by default and write
-evidence artifacts. With `execution_mode: "execute"`, generation/build steps run
-their configured Make commands, and approval-gated steps run only explicitly
-provided publish/install/live validation commands.
-
-Workflow YAML references task-specific prompts:
-
-```yaml
-steps:
-  - id: plan_upgrade
-    kind: codex
-    prompt: prompts/terraform_upgrade/plan_upgrade.md
-```
-
 Step prompts can reuse shared template sections:
 
 ```text
 {{include:prompts/_shared/runtime_context.md}}
 {{include:prompts/_shared/status_contract.md}}
+```
+
+## E2E Smoke Workflows
+
+The sample `generic-project` includes local smoke workflows:
+
+```text
+codex_edit_e2e
+  Runs a real Codex SDK edit, then verifies the edited file with a script.
+
+codex_fail_retry_e2e
+  Forces a Codex business failure, waits for feedback, retries, then verifies.
+
+fail_once_retry_e2e
+  Fails a script once, waits for feedback, then succeeds after retry.
+
+fail_once_skip_e2e
+  Fails an optional script step, skips it, then continues.
+
+review_retry_chain_e2e
+  Runs a reviewed Codex repair loop, then a failed reviewed Codex step with retry.
+
+review_exhaust_abort_e2e
+  Exhausts review rounds, waits for feedback, then supports abort.
+
+approval_first
+  Pauses immediately at an approval gate.
 ```
 
 ## Validate
@@ -585,3 +556,60 @@ These tests do not require a running Temporal server:
 source .venv/bin/activate
 python -m pytest -q
 ```
+
+For live validation, start Temporal, the worker, and the API, then submit one of
+the smoke workflows above.
+
+## Future Work
+
+These are intentionally not part of the current minimal runtime, but they are
+the next design areas to harden before using this as a broader AI Factory
+runtime.
+
+### Failed Workflow Orchestrator
+
+Add a coordinator process that scans recent failed workflows, reads artifacts and
+Temporal failure history, classifies whether the failure is retryable, and
+suggests or launches a new workflow attempt with a refined plan. This should be
+separate from the main workflow loop so normal step execution stays simple.
+
+### Idempotent Activity Side Effects
+
+Make Codex and script activities safer under Temporal activity retries by using
+operation ids, resumable artifact writes, explicit side-effect checkpoints, and
+clear replay/duplicate handling. The goal is for a worker crash or activity
+retry to avoid duplicate commits, duplicate usage rows, or inconsistent
+artifacts.
+
+### Durable Loop Memory Layer
+
+Add a durable run-memory model that stores compact decisions, observations,
+failure analysis, review outcomes, and retry rationale. This would give later
+steps and future workflow attempts a cleaner context source than passing full
+previous outputs forever.
+
+### Workflow Event Timeline
+
+Add a first-class `workflow_events` table for product-facing timeline queries:
+step started, Codex turn started, review verdict, approval requested, feedback
+received, retry reset, checkpoint committed, and workflow completed/failed.
+Temporal remains the execution source of truth; this table would support UI and
+analytics.
+
+### Generator Layer
+
+Add a project/task graph generator that can traverse project definitions and
+supported tasks to produce project packs, workflows, prompts, and script
+contracts. For now these files are hand-authored.
+
+### Worktree Lifecycle And Promotion
+
+Add commands or API endpoints to list managed worktrees, clean abandoned
+worktrees, promote a successful workflow branch, and optionally open a PR in the
+target repository.
+
+### Policy, Budget, And Governance
+
+Extend token/cost tracking into optional budget policy, approval policy,
+project-level safety rules, and audit exports. The current implementation only
+records usage.
