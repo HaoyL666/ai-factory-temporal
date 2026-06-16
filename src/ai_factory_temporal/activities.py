@@ -1030,6 +1030,7 @@ def _finish_failed(
     error: str,
 ) -> dict[str, Any]:
     output["status"] = StepStatus.FAILED.value
+    output.setdefault("error", error)
     output.setdefault("summary", error)
     output.setdefault("artifact_uri", str(artifact_dir))
     output.setdefault("step_result", str(artifact_dir / STEP_RESULT_FILENAME))

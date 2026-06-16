@@ -444,13 +444,28 @@ class AIFactoryWorkflow:
                     summary=self._timeline_summary("Step skipped", step_order, step["id"]),
                 )
 
+            reset_result = await self._reset_workspace_to_checkpoint(
+                spec,
+                last_checkpoint_commit,
+                activity_id=(
+                    f"reset-final-failure-{self._timeline_step_ref(step_order, step['id'])}"
+                    f"-step-run-{feedback_retry_count + 1}"
+                ),
+                summary=self._timeline_summary(
+                    "Reset workspace before final failure",
+                    step_order,
+                    step["id"],
+                ),
+            )
+            failed_output = dict(result.get("output", {}))
+            failed_output["workspace_reset"] = reset_result
             await self._activity(
                 "record_step_failed",
                 {
                     "db_path": spec["db_path"],
                     "workflow_id": spec["workflow_id"],
                     "step_id": step["id"],
-                    "output": result.get("output", {}),
+                    "output": failed_output,
                     "artifact_uri": result.get("artifact_uri"),
                     "error": result.get("error"),
                     "feedback_retry_count": feedback_retry_count,
